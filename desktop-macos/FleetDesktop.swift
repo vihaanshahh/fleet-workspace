@@ -76,7 +76,7 @@ enum FleetBridge {
         arguments += ["--", host.repo]
         let command = arguments.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let script = directory.appendingPathComponent("Fleet Workbench.command")
+        let script = directory.appendingPathComponent("Fleet Workspace.command")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o700])
         do {
