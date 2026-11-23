@@ -46,7 +46,7 @@ python3 fleet/fleet.py --ssh build-01 /srv/project
 python3 fleet/fleet.py --ssh build-01 --agent cursor --persist /srv/project
 ```
 
-For the lowest local startup cost, run `python3 fleet/fleet.py` directly, or install Python dependencies as described below. Both start directly in Python.
+Fleet’s terminal launcher runs directly with Python.
 
 An SSH destination can be a host alias from your OpenSSH config, including its user, port, identity and jump host. The repo argument is a directory on that machine. Quote a remote home-relative path such as `'~/src/project'` so the local shell leaves it intact. Fleet uses the installed macOS app’s Python when available, or `python3` (3.10+) on the remote shell’s PATH. Fleet looks for agents on PATH, in common user bin directories, and in the installed macOS app. Remote machines do not need Node, a Fleet checkout, or a running service. If Cursor reports a locked login keychain over SSH, use Fleet or Terminal in the desktop session on the Mac running Cursor.
 
