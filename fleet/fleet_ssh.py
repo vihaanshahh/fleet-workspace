@@ -15,7 +15,7 @@ import zipfile
 INSTALL = """
 import hashlib, io, os, pathlib, shutil, sys, tempfile, zipfile
 if sys.version_info < (3, 10):
-    sys.exit("vhscode fleet requires Python 3.10+ on this host")
+    sys.exit("Fleet Workspace requires Python 3.10+ on this host")
 digest = sys.argv[1]
 data = sys.stdin.buffer.read()
 if hashlib.sha256(data).hexdigest() != digest:
@@ -78,7 +78,9 @@ def remote_python(arguments):
     # macOS can expose an older system Python over SSH while the installed app ships a newer one.
     return (
         'fleet_python=python3; '
-        'for candidate in "$HOME/Applications/Fleet Workbench.app/Contents/Resources/python/bin/python3" '
+        'for candidate in "$HOME/Applications/Fleet Workspace.app/Contents/Resources/python/bin/python3" '
+        '"/Applications/Fleet Workspace.app/Contents/Resources/python/bin/python3" '
+        '"$HOME/Applications/Fleet Workbench.app/Contents/Resources/python/bin/python3" '
         '"/Applications/Fleet Workbench.app/Contents/Resources/python/bin/python3"; do '
         'if [ -x "$candidate" ]; then fleet_python="$candidate"; break; fi; done; '
         f'exec "$fleet_python" -E -s -B {arguments}'

@@ -65,7 +65,7 @@ enum FleetBridge {
         guard let terminal = workspace.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else {
             throw FleetError(message: "Terminal could not be found.")
         }
-        var arguments = [resources.appendingPathComponent("bin/vhscode-fleet").path]
+        var arguments = [resources.appendingPathComponent("bin/fleet-workspace").path]
         if let agent {
             arguments += ["--native", "--agent", agent]
             if let session, !session.isEmpty { arguments.append("--session=" + session) }
@@ -256,7 +256,7 @@ struct FleetDesktop: App {
     }
     private func post(_ name: String) { NotificationCenter.default.post(name: .init(name), object: nil) }
     var body: some Scene {
-        Window("Fleet Workbench", id: "fleet") {
+        Window("Fleet Workspace", id: "fleet") {
             FleetWindow().preferredColorScheme(.dark).tint(FleetPalette.accent)
                 .onReceive(NotificationCenter.default.publisher(for: .init("FleetWorkspaceDirty"))) {
                     delegate.dirty = $0.object as? Bool ?? false

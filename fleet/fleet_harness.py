@@ -242,8 +242,14 @@ def _find_harness(agent: str, parts: list[str]) -> tuple[list[str], dict[str, st
     ]
     if sys.platform == "darwin":
         # An SSH-launched workspace can use the CLIs from the app installed on its own host.
-        bundle_bin = "Applications/Fleet Workbench.app/Contents/Resources/bin"
-        fallback.extend((home / bundle_bin, Path("/") / bundle_bin))
+        fallback.extend(
+            path
+            for bundle_bin in (
+                "Applications/Fleet Workspace.app/Contents/Resources/bin",
+                "Applications/Fleet Workbench.app/Contents/Resources/bin",
+            )
+            for path in (home / bundle_bin, Path("/") / bundle_bin)
+        )
     paths = list(dict.fromkeys([*inherited, *(str(path) for path in fallback if path.is_absolute())]))
     search_path = os.pathsep.join(paths)
     if parts:

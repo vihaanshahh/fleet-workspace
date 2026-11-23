@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VHSCode terminal workbench. This file also runs directly on an SSH target."""
+"""Fleet Workspace terminal workbench. This file also runs directly on an SSH target."""
 from __future__ import annotations
 
 import argparse
@@ -45,7 +45,7 @@ def work(root, agent, quiet, view):
     detailed = False
     sessions = {}
     tags = set()
-    print(f"VHSCode fleet   {root}\n/files to browse and edit   /help for commands")
+    print(f"Fleet Workspace   {root}\n/files to browse and edit   /help for commands")
     while True:
         try:
             line = input(f"{agent} [{len(tags)} tagged]> ").strip()
@@ -151,8 +151,8 @@ def work(root, agent, quiet, view):
 
 def main():
     if sys.version_info < (3, 10):
-        sys.exit("vhscode fleet requires Python 3.10 or later")
-    parser = argparse.ArgumentParser(description="Edit a repository and use its native coding agents.")
+        sys.exit("Fleet Workspace requires Python 3.10 or later")
+    parser = argparse.ArgumentParser(prog="fleet-workspace", description="Edit a repository and use its native coding agents.")
     parser.add_argument("repo", default=".", nargs="?", help="repository directory on the target machine")
     parser.add_argument("--ssh", metavar="HOST", help="OpenSSH destination or configured host alias")
     parser.add_argument("--view", choices=["actions", "summary", "risks"], help="override the repository reporting setting")
@@ -218,6 +218,6 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except (OSError, ValueError) as error:
-        sys.exit(f"vhscode fleet: {error}")
+        sys.exit(f"Fleet Workspace: {error}")
     except KeyboardInterrupt:
         sys.exit(130)

@@ -1,8 +1,8 @@
-# Fleet workbench
+# Fleet Workspace guide
 
 ### Installed Mac app
 
-Open **Fleet Workbench** in Applications. Choose **File → Open Folder** (⌘O) or **File → Open Workspace from File** (⇧⌘O) to import a VS Code `.code-workspace` project. You can also drop folders or workspace files onto the window. Imported roots appear in the sidebar and persist between launches.
+Open **Fleet Workspace** in Applications. Choose **File → Open Folder** (⌘O) or **File → Open Workspace from File** (⇧⌘O) to import a VS Code `.code-workspace` project. You can also drop folders or workspace files onto the window. Imported roots appear in the sidebar and persist between launches.
 
 The file explorer, editor tabs, and agent controls share a native Mac window. Use ⌘P to find files, ⌘S to save, ⌘B to toggle the explorer, and ⌘W to close the current editor tab. Attach files using the paperclip beside a path in the explorer.
 
@@ -20,7 +20,7 @@ Type `/resume` in the composer to choose an existing session for this workspace,
 
 The **Model** dropdown beside the provider and view controls lists models from the selected CLI on the workspace's machine. Choosing a model applies it to that workspace and harness, including scheduled tasks. **CLI default** follows the CLI's configuration. If the account rejects the configured default, choose one of the models returned by that machine. Each scheduled task starts a fresh conversation.
 
-Open **Activity**, **Schedules**, or **Risks** to monitor tasks across hosts. The sidebar shows running agents and paused schedules. For an SSH workspace, enter an OpenSSH alias, use **Test SSH** for interactive authentication, and browse to a project folder on the remote machine. The Intel Mac bundle includes Python, Git, tmux, both agent CLIs, and the local MobileBERT model. The remote machine supplies Python 3.10+, its agent CLIs and their login sessions.
+Open **Activity**, **Schedules**, or **Risks** to monitor tasks across hosts. The sidebar shows running agents and paused schedules. For an SSH workspace, enter an OpenSSH alias, use **Test SSH** for interactive authentication, and browse to a project folder on the remote machine. The macOS bundle includes Python, Git, tmux, both agent CLIs, and the local MobileBERT model. The remote machine supplies Python 3.10+, its agent CLIs and their login sessions.
 
 If Cursor needs authentication, select its agent and click **Sign In to Cursor** in the composer or agent options. Approve the browser page on this Mac. Cursor saves the login on the selected workspace machine, and Fleet verifies its model catalog. If Cursor requests workspace trust, **Trust Workspace for Cursor…** opens a confirmation for that folder. You can revoke Fleet’s trust setting in agent options.
 
@@ -36,21 +36,21 @@ Choose **Agent options → YOLO Mode (Full Access)** to run desktop Codex prompt
 
 ### Running from a source checkout
 
-Use the fork's launcher from this checkout. Fleet runs on macOS or Linux with Python 3.10+ and a terminal. Install and authenticate the Codex or Cursor CLI on each machine where you want that agent to work.
+Fleet runs from this checkout on macOS or Linux with Python 3.10+ and a terminal. Install and authenticate the Codex or Cursor CLI on each machine where you want that agent to work.
 
 ```sh
-./vhscode/bin/vhscode fleet ~/src/project
-./vhscode/bin/vhscode fleet --ssh build-01 /srv/project
-./vhscode/bin/vhscode fleet --ssh build-01 --agent cursor --persist /srv/project
+./fleet/fleet.py ~/src/project
+./fleet/fleet.py --ssh build-01 /srv/project
+./fleet/fleet.py --ssh build-01 --agent cursor --persist /srv/project
 ```
 
-For the lowest local startup cost, run `./vhscode/fleet/fleet.py` directly, or use `vhscode-fleet` when this branch’s package is installed. Both start directly in Python.
+The macOS bundle also provides the `fleet-workspace` launcher in `Contents/Resources/bin`.
 
-An SSH destination can be a host alias from your OpenSSH config, including its user, port, identity and jump host. The repo argument is a directory on that machine. Quote a remote home-relative path such as `'~/src/project'` so the local shell leaves it intact. Fleet uses the installed macOS app’s Python when available, or `python3` (3.10+) on the remote shell’s PATH. Fleet looks for agents on PATH, in common user bin directories, and in the installed macOS app. Remote machines do not need Node, a checkout of this fork, or a running service. If Cursor reports a locked login keychain over SSH, use Fleet or Terminal in the desktop session on the Mac running Cursor.
+An SSH destination can be a host alias from your OpenSSH config, including its user, port, identity and jump host. The repo argument is a directory on that machine. Quote a remote home-relative path such as `'~/src/project'` so the local shell leaves it intact. Fleet uses the installed macOS app’s Python when available, or `python3` (3.10+) on the remote shell’s PATH. Fleet looks for agents on PATH, in common user bin directories, and in the installed macOS app. Remote machines do not need Node, a checkout of Fleet Workspace, or a running service. If Cursor reports a locked login keychain over SSH, use Fleet or Terminal in the desktop session on the Mac running Cursor.
 
 ## Fleet dashboard
 
-Launch `./vhscode/fleet/fleet.py` with no arguments for the dashboard. You can also open it with `vhscode fleet --dashboard` or `/dashboard` at the workbench prompt. The inventory belongs to the machine running the dashboard. Open it on your laptop for a fleet-wide view. Successfully connecting with `--ssh` adds that destination to its inventory.
+Launch `./fleet/fleet.py` with no arguments for the terminal dashboard. You can also open it with `fleet-workspace --dashboard` from the installed app’s launcher or `/dashboard` at the workbench prompt. The inventory belongs to the machine running the dashboard. Open it on your laptop for a fleet-wide view. Successfully connecting with `--ssh` adds that destination to its inventory.
 
 The Activity view lists running tasks and recent completions across machines. Press Enter on a task to inspect its history. Tab cycles through Hosts, Schedules, and Risks. Inspect a run for the public plan, actions, and outcome reported by its harness. Open the schedules view to choose the target repository, Codex or Cursor, prompt, repeat interval in minutes, and reporting mode. You can edit, pause, resume, and remove schedules there. Opening a host interactively lets you complete a first SSH login or host-key prompt. Background polling uses key-based login or an existing authenticated connection.
 
@@ -77,7 +77,7 @@ Choose a mode in each schedule’s form. In an interactive repository, `/view su
 
 ## Output filtering
 
-On the machine running the workbench, enter `/filter-setup` once to fetch the pinned quantized MobileBERT model and install its CPU runtime into a user-cache virtual environment. Use `/details` to show public progress, then enter `/filter` to classify eligible progress. You can also enable the filter flag at startup with `--filter`. Model setup requires network access and a compatible Python interpreter. Inference runs locally. You can verify installation directly from the checkout with `python3 vhscode/fleet/fleet_filter.py smoke`.
+On the machine running the workbench, enter `/filter-setup` once to fetch the pinned quantized MobileBERT model and install its CPU runtime into a user-cache virtual environment. Use `/details` to show public progress, then enter `/filter` to classify eligible progress. You can also enable the filter flag at startup with `--filter`. Model setup requires network access and a compatible Python interpreter. Inference runs locally. You can verify installation directly from the checkout with `python3 fleet/fleet_filter.py smoke`.
 
 Only eligible transient events enter the classifier. Final assistant messages, warnings, errors and approval events go straight to the terminal. Under load, on timeout, or if the optional runtime is unavailable, the workbench shows the progress event. The CLI's own session history remains available in the native harness.
 
@@ -85,7 +85,7 @@ Only eligible transient events enter the classifier. Final assistant messages, w
 
 | Component | Work performed |
 | --- | --- |
-| Launcher | Dispatches directly into the Python terminal interface before initializing the OpenCode sidecars. |
+| Launcher | Starts the Python terminal interface or opens the installed macOS app. |
 | SSH transport | Sends a small compressed Python bundle through OpenSSH, installs it atomically under `~/.cache/vhscode/fleet/<digest>`, and attaches a PTY on the same authenticated connection. Only terminal I/O crosses that connection during editing. |
 | Dashboard and scheduler | Poll hosts in the background and persist host-local schedules in SQLite. The dashboard fetches individual histories on demand. Each host retains up to 100 finished runs and 80 events per run. |
 | File browser | Enumerates one directory on demand and renders a page of entries. The native editor owns the open buffer. The workbench keeps paths for tagged files. |
