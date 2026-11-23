@@ -29,11 +29,11 @@ struct WorkspaceGitChange: Decodable, Hashable, Identifiable {
         return code.replacingOccurrences(of: ".", with: "")
     }
 
-    var color: Color {
-        if isConflicted || isDeleted { return FleetPalette.failure }
-        if isUntracked || code.contains("A") { return FleetPalette.success }
-        if code.contains("R") || code.contains("C") { return FleetPalette.accent }
-        return FleetPalette.warning
+    func color(_ palette: WorkbenchPalette) -> Color {
+        if isConflicted || isDeleted { return palette.negative }
+        if isUntracked || code.contains("A") { return palette.positive }
+        if code.contains("R") || code.contains("C") { return palette.tint }
+        return palette.caution
     }
 
     var summary: String {
@@ -120,12 +120,13 @@ final class WorkspaceGit: ObservableObject {
 }
 
 struct WorkspaceGitBadge: View {
+    @Environment(\.workbenchPalette) private var palette
     let change: WorkspaceGitChange
 
     var body: some View {
         Text(change.badge)
             .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .foregroundStyle(change.color)
+            .foregroundStyle(change.color(palette))
             .help(change.summary)
             .accessibilityLabel(change.summary)
     }
@@ -133,6 +134,7 @@ struct WorkspaceGitBadge: View {
 
 @MainActor
 struct WorkspaceGitChanges: View {
+    @Environment(\.workbenchPalette) private var palette
     @ObservedObject var git: WorkspaceGit
     let openDiff: (WorkspaceGitChange) -> Void
     @State private var expanded = false
@@ -174,7 +176,7 @@ struct WorkspaceGitChanges: View {
                     }
                 }
                 if let error = git.fetchError ?? git.statusError {
-                    Text(error).font(.caption).foregroundStyle(FleetPalette.warning)
+                    Text(error).font(.caption).foregroundStyle(palette.caution)
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
@@ -182,7 +184,7 @@ struct WorkspaceGitChanges: View {
         } else if let error = git.statusError {
             Text("Git status unavailable")
                 .font(.caption)
-                .foregroundStyle(FleetPalette.warning)
+                .foregroundStyle(palette.caution)
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .help(error)
         }
@@ -220,6 +222,7 @@ struct WorkspaceGitChanges: View {
 
 @MainActor
 struct WorkspaceGitDiff: View {
+    @Environment(\.workbenchPalette) private var palette
     private struct Section: Decodable, Identifiable {
         let title: String
         let text: String
@@ -227,35 +230,104 @@ struct WorkspaceGitDiff: View {
         var id: String { title }
     }
 
+    private struct Preview: Identifiable {
+        let section: Section
+        var id: String { section.id }
+        let body: AttributedString
+        let added: Int
+        let removed: Int
+
+        init(_ section: Section, untracked: Bool, palette: WorkbenchPalette) {
+            self.section = section
+            var body = AttributedString()
+            var added = 0
+            var removed = 0
+            var prefixWidth = 0
+            let text = section.text
+            text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: [.byLines]) { line, _, range, _ in
+                guard let line else { return }
+                var rendered = AttributedString(text[range])
+                if untracked {
+                    added += 1
+                    rendered.foregroundColor = palette.positive
+                } else if line.hasPrefix("@@") {
+                    prefixWidth = line.prefix(while: { $0 == "@" }).count - 1
+                    rendered.foregroundColor = palette.tint
+                } else if line.hasPrefix("diff --") {
+                    prefixWidth = 0
+                    rendered.foregroundColor = .secondary
+                } else {
+                    switch line.prefix(prefixWidth).first(where: { $0 == "+" || $0 == "-" }) {
+                    case "+":
+                        added += 1
+                        rendered.foregroundColor = palette.positive
+                        rendered.backgroundColor = palette.positive.opacity(0.11)
+                    case "-":
+                        removed += 1
+                        rendered.foregroundColor = palette.negative
+                        rendered.backgroundColor = palette.negative.opacity(0.11)
+                    default:
+                        if prefixWidth == 0 || line.hasPrefix("\\") { rendered.foregroundColor = .secondary }
+                    }
+                }
+                body.append(rendered)
+            }
+            self.body = body
+            self.added = added
+            self.removed = removed
+        }
+    }
+
     let host: FleetHost
     let change: WorkspaceGitChange
-    let openFile: (String) -> Void
+    var hasUnsavedEdits = false
+    let openFile: ((String) -> Void)?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.workbenchTypography) private var typography
     @State private var sections: [Section]?
     @State private var error: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(change.original.map { "\($0) → \(change.path)" } ?? change.path)
-                    .font(.headline).textSelection(.enabled)
-                Spacer()
-                WorkspaceGitBadge(change: change)
+                    .font(.headline).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                Text(change.summary).font(.caption).foregroundStyle(change.color(palette))
+            }
+            if hasUnsavedEdits {
+                Label("Save your edits to include them in this diff.", systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Divider()
             if let sections, !sections.isEmpty {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        ForEach(sections) { section in
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(section.title).font(.subheadline.weight(.semibold))
+                        ForEach(sections.map { Preview($0, untracked: change.isUntracked, palette: palette) }) { preview in
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack(spacing: 10) {
+                                    Text(preview.section.title).font(.subheadline.weight(.semibold))
+                                    Spacer()
+                                    if preview.added > 0 {
+                                        Text("+\(preview.added) added").foregroundStyle(palette.positive)
+                                    }
+                                    if preview.removed > 0 {
+                                        Text("−\(preview.removed) removed").foregroundStyle(palette.negative)
+                                    }
+                                }
+                                .font(.caption.monospacedDigit())
                                 ScrollView(.horizontal) {
-                                    Text(verbatim: section.text)
-                                        .font(.system(.caption, design: .monospaced))
+                                    Text(preview.body.characters.isEmpty ? AttributedString("Empty file") : preview.body)
+                                        .font(typography.code)
                                         .textSelection(.enabled)
                                         .fixedSize(horizontal: true, vertical: false)
+                                        .padding(9)
                                 }
-                                if section.truncated {
+                                .background(palette.editor, in: RoundedRectangle(cornerRadius: 7))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 7).strokeBorder(palette.separator)
+                                        .allowsHitTesting(false)
+                                }
+                                if preview.section.truncated {
                                     Text("Diff preview truncated").font(.caption).foregroundStyle(.secondary)
                                 }
                             }
@@ -265,14 +337,14 @@ struct WorkspaceGitDiff: View {
                 }
             } else {
                 Group {
-                    if let error { Text(error).foregroundStyle(FleetPalette.warning).textSelection(.enabled) }
+                    if let error { Text(error).foregroundStyle(palette.caution).textSelection(.enabled) }
                     else if sections != nil { Text("No current changes for this file.").foregroundStyle(.secondary) }
                     else { ProgressView("Loading diff…") }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             HStack {
-                if !change.isDeleted {
+                if let openFile, !change.isDeleted {
                     Button("Open File") {
                         dismiss()
                         openFile(change.path)
@@ -284,6 +356,7 @@ struct WorkspaceGitDiff: View {
         }
         .padding(16)
         .frame(minWidth: 540, idealWidth: 660, minHeight: 320, idealHeight: 420)
+        .background(palette.surface)
         .task {
             var request: [String: Any] = ["op": "git_diff", "path": change.path, "untracked": change.isUntracked]
             if let original = change.original { request["original"] = original }
@@ -293,7 +366,8 @@ struct WorkspaceGitDiff: View {
                 guard let rawSections = reply["sections"] else {
                     throw FleetError(message: "The workspace did not return a diff.")
                 }
-                sections = try JSONDecoder().decode([Section].self, from: JSONSerialization.data(withJSONObject: rawSections))
+                let decoded = try JSONDecoder().decode([Section].self, from: JSONSerialization.data(withJSONObject: rawSections))
+                sections = decoded
             } catch {
                 if !Task.isCancelled { self.error = error.localizedDescription }
             }

@@ -6,11 +6,16 @@ final class SourceBuffer: ObservableObject, Identifiable {
     nonisolated let path: String
     nonisolated var id: String { path }
     let storage: NSTextStorage
+    fileprivate let undoManager = UndoManager()
     @Published private(set) var isDirty = false
     @Published var isSaving = false
     @Published var diskRevision: String?
     var revision: String
     private var savedText: NSString
+    // NSTextView undo registrations are view-owned, so retain the native view with
+    // its buffer when SwiftUI tears down and recreates the representable.
+    fileprivate var retainedEditor: PlainSourceView.SourceTextView?
+    fileprivate weak var activeCoordinator: PlainSourceView.Coordinator?
 
     init(path: String, text: String, revision: String) {
         self.path = path
@@ -41,9 +46,7 @@ final class SourceBuffer: ObservableObject, Identifiable {
     }
 
     func reload(_ contents: String, revision: String) {
-        for layout in storage.layoutManagers {
-            layout.textContainers.first?.textView?.undoManager?.removeAllActions()
-        }
+        undoManager.removeAllActions()
         storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: contents)
         didSave(contents, revision: revision)
     }
@@ -54,6 +57,8 @@ struct PlainSourceView: NSViewRepresentable {
     let buffer: SourceBuffer
     let edited: () -> Void
     let save: () -> Void
+    @Environment(\.workbenchPalette) private var palette
+    @Environment(\.workbenchTypography) private var typography
 
     func makeCoordinator() -> Coordinator { Coordinator(buffer: buffer, edited: edited) }
 
@@ -62,16 +67,22 @@ struct PlainSourceView: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
-        let layout = NSLayoutManager()
-        layout.allowsNonContiguousLayout = true
-        let container = NSTextContainer(size: NSSize(width: CGFloat.greatestFiniteMagnitude,
-                                                     height: CGFloat.greatestFiniteMagnitude))
-        layout.addTextContainer(container)
-        buffer.storage.addLayoutManager(layout)
-        let editor = SourceTextView(frame: scroll.contentView.bounds, textContainer: container)
+        let editor: SourceTextView
+        if let retained = buffer.retainedEditor, retained.layoutManager != nil {
+            editor = retained
+        } else {
+            let layout = NSLayoutManager()
+            layout.allowsNonContiguousLayout = true
+            let container = NSTextContainer(size: NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                         height: CGFloat.greatestFiniteMagnitude))
+            layout.addTextContainer(container)
+            buffer.storage.addLayoutManager(layout)
+            editor = SourceTextView(frame: scroll.contentView.bounds, textContainer: container)
+            buffer.retainedEditor = editor
+        }
+        editor.bufferUndoManager = buffer.undoManager
         editor.delegate = context.coordinator
-        editor.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        editor.textContainerInset = NSSize(width: 12, height: 10)
+        editor.textContainerInset = NSSize(width: 16, height: 12)
         editor.textContainer?.widthTracksTextView = false
         editor.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                                      height: CGFloat.greatestFiniteMagnitude)
@@ -92,6 +103,15 @@ struct PlainSourceView: NSViewRepresentable {
         editor.setAccessibilityLabel("Editor for \(buffer.path)")
         editor.save = save
         scroll.documentView = editor
+        let ruler = SourceLineRuler(scrollView: scroll, editor: editor)
+        scroll.verticalRulerView = ruler
+        scroll.hasVerticalRuler = true
+        scroll.rulersVisible = true
+        context.coordinator.ruler = ruler
+        context.coordinator.editor = editor
+        buffer.activeCoordinator?.highlightTask?.cancel()
+        buffer.activeCoordinator = context.coordinator
+        buffer.storage.delegate = context.coordinator
         return scroll
     }
 
@@ -99,22 +119,96 @@ struct PlainSourceView: NSViewRepresentable {
         context.coordinator.edited = edited
         guard let editor = scroll.documentView as? SourceTextView else { return }
         editor.save = save
+        context.coordinator.setAppearance(palette, typography: typography)
     }
 
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
-        guard let editor = scroll.documentView as? SourceTextView, let layout = editor.layoutManager else { return }
-        editor.delegate = nil
-        editor.undoManager?.removeAllActions()
-        layout.textStorage?.removeLayoutManager(layout)
+        coordinator.highlightTask?.cancel()
+        guard coordinator.buffer.activeCoordinator === coordinator else { return }
+        coordinator.buffer.storage.delegate = nil
+        coordinator.buffer.activeCoordinator = nil
+        guard let editor = scroll.documentView as? SourceTextView else { return }
+        if editor.delegate === coordinator { editor.delegate = nil }
+        editor.save = nil
     }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
         let buffer: SourceBuffer
+        private let language: SourceLanguage?
         var edited: () -> Void
+        weak var editor: SourceTextView?
+        weak var ruler: SourceLineRuler?
+        var highlightTask: Task<Void, Never>?
+        private var palette: WorkbenchPalette?
+        private var typography: WorkbenchTypography?
+        private var sourceAttributes: [NSAttributedString.Key: Any] = [:]
 
         init(buffer: SourceBuffer, edited: @escaping () -> Void) {
             self.buffer = buffer
+            language = SourceLanguage(path: buffer.path)
             self.edited = edited
+        }
+
+        func setAppearance(_ palette: WorkbenchPalette, typography: WorkbenchTypography) {
+            guard let editor, self.palette != palette || self.typography != typography else { return }
+            let themeChanged = self.palette != palette
+            self.palette = palette
+            self.typography = typography
+            ruler?.palette = palette
+
+            let ink = WorkbenchPalette.color(palette.ink)
+            let canvas = WorkbenchPalette.color(palette.canvas)
+            editor.backgroundColor = canvas
+            editor.enclosingScrollView?.backgroundColor = canvas
+            editor.insertionPointColor = ink
+            let highlight = WorkbenchPalette.color(palette.accent).blended(withFraction: 0.72, of: canvas) ?? canvas
+            editor.selectedTextAttributes = [.backgroundColor: highlight, .foregroundColor: ink]
+
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineSpacing = 3
+            sourceAttributes = [
+                .font: typography.native, .foregroundColor: ink, .paragraphStyle: paragraph,
+            ]
+            editor.defaultParagraphStyle = paragraph
+            buffer.storage.setAttributes(sourceAttributes, range: NSRange(location: 0, length: buffer.storage.length))
+            editor.typingAttributes = sourceAttributes
+            if themeChanged { refreshHighlighting() }
+        }
+
+        nonisolated func textStorage(_ textStorage: NSTextStorage, willProcessEditing editedMask: NSTextStorageEditActions,
+                                     range editedRange: NSRange, changeInLength delta: Int) {
+            guard editedMask.contains(.editedCharacters), editedRange.length > 0 else { return }
+            // AppKit's undo restores the attributes that were present before a theme or font change.
+            MainActor.assumeIsolated {
+                if !sourceAttributes.isEmpty { self.buffer.storage.setAttributes(sourceAttributes, range: editedRange) }
+            }
+        }
+
+        nonisolated func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
+                                     range editedRange: NSRange, changeInLength delta: Int) {
+            // SourceBuffer owns the storage and mutates it on the main actor.
+            if editedMask.contains(.editedCharacters) { MainActor.assumeIsolated { refreshHighlighting() } }
+        }
+
+        private func refreshHighlighting() {
+            guard let palette, let layout = editor?.layoutManager else { return }
+            highlightTask?.cancel()
+            let buffer = self.buffer
+            let language = self.language
+            highlightTask = Task { [weak layout, weak ruler] in
+                guard (try? await Task.sleep(for: .milliseconds(120))) != nil else { return }
+                ruler?.updateLines()
+                guard let language else { return }
+                let tokens = await language.tokens(in: buffer.text)
+                guard !Task.isCancelled, let layout else { return }
+                // Layout-only color keeps syntax out of undo, clipboard contents, and saves.
+                layout.removeTemporaryAttribute(.foregroundColor, forCharacterRange: NSRange(location: 0, length: buffer.storage.length))
+                let colors = SourceLanguage.Token.allCases.map { WorkbenchPalette.color($0.color(palette)) }
+                for (range, token) in tokens {
+                    layout.addTemporaryAttribute(.foregroundColor, value: colors[token.rawValue], forCharacterRange: range)
+                }
+            }
         }
 
         func textDidChange(_ notification: Notification) {
@@ -123,8 +217,8 @@ struct PlainSourceView: NSViewRepresentable {
     }
 
     final class SourceTextView: NSTextView {
-        private let editorUndo = UndoManager()
-        override var undoManager: UndoManager? { editorUndo }
+        weak var bufferUndoManager: UndoManager?
+        override var undoManager: UndoManager? { bufferUndoManager ?? super.undoManager }
         var save: (() -> Void)?
 
         override func performKeyEquivalent(with event: NSEvent) -> Bool {

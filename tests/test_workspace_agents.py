@@ -18,12 +18,16 @@ session = args[-2] if 'resume' in args else 'thread-' + prompt
 def emit(kind, **fields):
     print(json.dumps(dict(type=kind, **fields)), flush=True)
 emit('thread.started', thread_id=session)
+for message in ('Starting', 'Reviewing', 'Checking ' + session):
+    emit('item.completed', item={'type': 'agent_message', 'phase': 'commentary', 'text': message})
+emit('item.started', item={'type': 'command_execution', 'command': 'git status'})
+emit('item.completed', item={'type': 'command_execution', 'exit_code': 0, 'aggregated_output': 'Raw command output'})
 for _ in range(600):
     if pathlib.Path('release').exists(): break
     time.sleep(.03)
 text = '## ' + session + '\\n\\n```python\\n' + ('# sample\\n' * 550) + '```'
 emit('item.completed', item={'type': 'agent_message', 'text': text})
-emit('turn.completed')
+emit('turn.completed', usage={'input_tokens': 12})
 """
 
 
@@ -87,7 +91,16 @@ class WorkspaceAgentsTests(unittest.TestCase):
             for lane, name in enumerate(("Build", "Docs", "Vérification"), start=3):
                 self.assertEqual(call("add_agent", agent="codex", name=f" {name} "), {"lane": lane, "name": name})
                 extra_runs.append(call("submit", agent="codex", lane=lane, prompt=name)["id"])
-            listings = call("sidebar_agents", repos=[host["repo"]])["workspaces"][host["repo"]]
+            for _ in range(50):
+                dashboard = call("sidebar_agents", repos=[host["repo"]], live=True)
+                listings = dashboard["workspaces"][host["repo"]]
+                if listings[0]["action"]:
+                    break
+                time.sleep(.04)
+            self.assertTrue(listings[0]["action"])
+            self.assertEqual(dashboard["live_runs"], [])
+            self.assertEqual({row["id"] for row in call("sidebar_agents", repos=[], live=True)["live_runs"]},
+                             {first, second, *extra_runs})
             self.assertEqual([(row["lane"], row["name"], row["status"]) for row in listings], [
                 (1, "Implementation", "running"), (2, "Review API", "running"), (3, "Build", "running"),
                 (4, "Docs", "running"), (5, "Vérification", "running"),
@@ -105,8 +118,19 @@ class WorkspaceAgentsTests(unittest.TestCase):
             result = next(event["text"] for event in detail["events"] if event["kind"] == "result")
             self.assertGreater(len(result), 4096)
             self.assertTrue(result.endswith("```"))
+            output = call("sidebar_agents", repos=[host["repo"]], include_output=True)["workspaces"][host["repo"]]
+            for row, run_id in zip(output, [first, second, *extra_runs], strict=True):
+                self.assertEqual(row["runID"], run_id)
+                self.assertEqual([entry["kind"] for entry in row["output"]], ["info", "info", "result"])
+                self.assertNotIn("Starting", [entry["text"] for entry in row["output"]])
+                self.assertEqual(len(row["output"][-1]["text"]), 1200)
+            preview = output[1]["output"]
+            self.assertEqual(preview[1]["text"], "Checking thread-two")
+            self.assertTrue(preview[-1]["text"].startswith("## thread-two"))
+            self.assertIn("Raw command output", [entry["text"] for entry in full["events"]])
             self.assertEqual(call("reset_session", agent="codex", lane=1), {})
             restored = {row["lane"]: row for row in call("workspace_agents")["instances"] if row["agent"] == "codex"}
+            self.assertEqual([run["id"] for run in restored[2]["history"]], [second])
             self.assertIsNone(restored[1]["session"])
             self.assertIsNone(restored[1]["run"])
             self.assertEqual(restored[1]["name"], "Implementation")
@@ -115,6 +139,8 @@ class WorkspaceAgentsTests(unittest.TestCase):
             self.assertEqual(restored[5]["name"], "Vérification")
             followup = call("submit", agent="codex", lane=2, prompt="continue")["id"]
             self.assertEqual(completed(followup)["run"]["session"], "thread-two")
+            history = next(row for row in call("workspace_agents")["instances"] if row["lane"] == 2)
+            self.assertEqual([run["id"] for run in history["history"]], [followup, second])
 
             # A paused schedule can coexist with live/manual agents in the same tree.
             with sqlite3.connect(state / "activity.sqlite3") as db:

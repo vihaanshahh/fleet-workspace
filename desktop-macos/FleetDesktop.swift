@@ -20,6 +20,7 @@ struct FleetAgentLaneSelection: Equatable {
     let id = UUID()
     let agent: String
     let lane: Int
+    var action: FleetAgentAction? = nil
 }
 
 struct FleetAgentLane: Hashable {
@@ -65,7 +66,7 @@ enum FleetBridge {
         guard let terminal = workspace.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else {
             throw FleetError(message: "Terminal could not be found.")
         }
-        var arguments = [resources.appendingPathComponent("bin/fleet-workspace").path]
+        var arguments = [resources.appendingPathComponent("bin/vhscode-fleet").path]
         if let agent {
             arguments += ["--native", "--agent", agent]
             if let session, !session.isEmpty { arguments.append("--session=" + session) }
@@ -223,16 +224,13 @@ private final class FleetAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-enum FleetPalette {
-    static let accent = Color(red: 0.47, green: 0.66, blue: 0.62)
-    static let success = Color(red: 0.55, green: 0.66, blue: 0.51)
-    static let warning = Color(red: 0.73, green: 0.62, blue: 0.47)
-    static let failure = Color(red: 0.75, green: 0.52, blue: 0.52)
-}
-
 @main
 struct FleetDesktop: App {
     @NSApplicationDelegateAdaptor(FleetAppDelegate.self) private var delegate
+    @AppStorage("FleetTheme") private var theme = WorkbenchTheme.midnight
+    @AppStorage("FleetCodeFont") private var family = WorkbenchCodeFont.system
+    @AppStorage("FleetCodeFontSize") private var size = 13
+
     init() {
         signal(SIGPIPE, SIG_IGN)
         if CommandLine.arguments.dropFirst().first == "--ssh-askpass" { Self.askPass() }
@@ -257,7 +255,9 @@ struct FleetDesktop: App {
     private func post(_ name: String) { NotificationCenter.default.post(name: .init(name), object: nil) }
     var body: some Scene {
         Window("Fleet Workspace", id: "fleet") {
-            FleetWindow().preferredColorScheme(.dark).tint(FleetPalette.accent)
+            FleetWindow()
+                .modifier(WorkbenchAppearance(theme: theme, typography: WorkbenchTypography(family: family, size: size)))
+                .preferredColorScheme(theme.scheme)
                 .onReceive(NotificationCenter.default.publisher(for: .init("FleetWorkspaceDirty"))) {
                     delegate.dirty = $0.object as? Bool ?? false
                 }
@@ -277,6 +277,19 @@ struct FleetDesktop: App {
                 Button("Close Editor Tab") { post("FleetCloseTab") }.keyboardShortcut("w")
             }
         }
+        Settings { WorkbenchSettings() }
+    }
+}
+
+enum FleetRunStatus {
+    static let needsAttention = "needs_attention"
+
+    static func label(_ status: String) -> String {
+        status == needsAttention ? "Needs Attention" : status.capitalized
+    }
+
+    static func isActive(_ status: String) -> Bool {
+        status == "running" || status == needsAttention
     }
 }
 
@@ -286,6 +299,9 @@ private struct FleetWindow: View {
         let lane: Int
         let status: String
         let title: String?
+        let action: String?
+        let runID: String?
+        let output: [FleetActivityEvent]?
         let schedule: String?
         let name: String?
         var id: String { schedule.map { "schedule-\($0)" } ?? "\(agent)-\(lane)" }
@@ -296,6 +312,7 @@ private struct FleetWindow: View {
         var statusLabel: String {
             switch status {
             case "running": "Running"
+            case FleetRunStatus.needsAttention: FleetRunStatus.label(status)
             case "completed": "Done"
             case "failed": "Failed"
             case "cancelled": "Stopped"
@@ -305,11 +322,12 @@ private struct FleetWindow: View {
             default: "—"
             }
         }
-        var statusColor: Color {
+        func statusColor(_ palette: WorkbenchPalette) -> Color {
             switch status {
-            case "running": FleetPalette.accent
-            case "completed": FleetPalette.success
-            case "failed": FleetPalette.warning
+            case "running": palette.tint
+            case FleetRunStatus.needsAttention: palette.caution
+            case "completed": palette.positive
+            case "failed": palette.caution
             default: .secondary
             }
         }
@@ -317,24 +335,42 @@ private struct FleetWindow: View {
 
     private struct SidebarQuery: Equatable {
         let active: Bool
+        let dashboard: Bool
+        let revision: UUID
         let hosts: [FleetHost]
     }
 
+    private struct SidebarRoster: Decodable {
+        let workspaces: [String: [SidebarAgent]]
+        let liveRuns: [FleetLiveRun]?
+
+        enum CodingKeys: String, CodingKey {
+            case workspaces
+            case liveRuns = "live_runs"
+        }
+    }
+
+    @Environment(\.workbenchPalette) private var palette
     @Environment(\.scenePhase) private var scenePhase
     @State private var hosts: [FleetHost] = []
     @AppStorage("FleetLastWorkspace") private var selectedHost = "local"
-    @State private var collapsedGroups = Set<String>()
+    @State private var collapsedGroups = Set(UserDefaults.standard.stringArray(forKey: "FleetCollapsedGroups") ?? [])
     @State private var openedRepo: String?
     @State private var section = "Workspace"
     @State private var activityAgentOpen = false
+    @State private var activityRunsOpen = false
+    @State private var activityRunID: String?
     @State private var draft: FleetHost?
     @State private var error = ""
     @State private var confirmingRemoval = false
     @State private var dirty = false
-    @State private var expandedAgents: [String: Bool] = [:]
+    @State private var expandedAgents = UserDefaults.standard.dictionary(forKey: "FleetExpandedWorkspaces") as? [String: Bool] ?? [:]
     @State private var sidebarAgents: [FleetHost: [SidebarAgent]] = [:]
+    @State private var liveRuns: [String: [FleetLiveRun]] = [:]
+    @State private var reachable: [String: Bool] = [:]
     @State private var laneSelection: FleetAgentLaneSelection?
-    @State private var localAgentLabels: [FleetHost: [FleetAgentLane: String]] = [:]
+    @State private var workspaceDrafts = WorkspaceDraftStore()
+    @State private var rosterRevision = UUID()
     @State private var activeAgentLane: [FleetHost: FleetAgentLane] = [:]
     private var current: FleetHost? {
         guard var host = hosts.first(where: { $0.id == selectedHost }) ?? hosts.first else { return nil }
@@ -342,37 +378,53 @@ private struct FleetWindow: View {
         return host
     }
     private var sidebarQuery: SidebarQuery {
-        SidebarQuery(active: scenePhase == .active, hosts: hosts.map(sidebarHost))
+        SidebarQuery(active: scenePhase == .active, dashboard: section == "Activity" && !activityRunsOpen,
+                     revision: rosterRevision, hosts: hosts.map(sidebarHost))
     }
     private var activityAgents: [FleetActivityAgent] {
         sidebarQuery.hosts.flatMap { host in
             agentRows(host).compactMap { agent in
                 guard agent.schedule == nil else { return nil }
                 return FleetActivityAgent(host: host, lane: FleetAgentLane(agent: agent.agent, lane: agent.lane),
-                                          label: agent.label, status: agent.status, statusLabel: agent.statusLabel)
+                                          label: agent.label, status: agent.status, statusLabel: agent.statusLabel,
+                                          title: agent.title, action: agent.action, runID: agent.runID,
+                                          output: agent.output ?? [], reachable: reachable[host.ssh] != false)
             }
         }
     }
-    private let sections = [("Activity", "waveform.path.ecg"), ("Schedules", "calendar.badge.clock"), ("Risks", "exclamationmark.triangle")]
+    private var activityHosts: [FleetHost] {
+        var seen = Set<String>()
+        return hosts.filter { seen.insert($0.ssh).inserted }
+    }
+
+    private let sections: [(title: String, icon: String, area: WorkbenchArea)] = [
+        ("Activity", "waveform.path.ecg", .activity),
+        ("Schedules", "calendar.badge.clock", .schedules),
+        ("Risks", "exclamationmark.triangle", .risks),
+    ]
 
     var body: some View {
         let showsFiles = section == "Workspace"
-        let showsActivityAgent = section == "Activity" && activityAgentOpen && current != nil
+        let showsDashboard = section == "Activity" && !activityRunsOpen
+        let showsActivityAgent = showsDashboard && activityAgentOpen && current != nil
         let showsWorkspace = showsFiles || showsActivityAgent
-        let agents = section == "Activity" ? activityAgents : []
+        let overviewPalette = palette.scoped(to: sections.first { $0.title == section }?.area ?? .workspace)
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 6) {
                     Image(systemName: "square.3.layers.3d")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(FleetPalette.accent)
+                        .foregroundStyle(palette.tint)
                         .accessibilityHidden(true)
-                    Text("Fleet").font(.system(size: 15, weight: .semibold, design: .rounded))
+                    Text("Fleet Workspace").font(.system(size: 14, weight: .semibold, design: .rounded)).lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
                 .padding(.bottom, 6)
-                ForEach(sections, id: \.0) { item in
-                    railButton(item.0, item.1, selected: section == item.0) { section = item.0 }
+                ForEach(sections, id: \.title) { item in
+                    railButton(item.title, item.icon, selected: section == item.title, area: item.area) {
+                        if item.title == "Activity" { activityRunsOpen = false }
+                        section = item.title
+                    }
                 }
                 HStack {
                     Text("WORKSPACES").font(.system(size: 10, weight: .semibold)).tracking(1.5).foregroundStyle(.secondary)
@@ -401,35 +453,46 @@ private struct FleetWindow: View {
                         }
                     }
                 }
+                palette.separator.frame(height: 1).padding(.vertical, 8)
                 if let host = current {
-                    Divider().padding(.vertical, 8)
-                    Button { if !dirty || mayDiscardEdits() { draft = host } } label: {
-                        Label("Workspace settings", systemImage: "slider.horizontal.3")
-                            .font(.system(size: 12)).foregroundStyle(.secondary)
-                    }.buttonStyle(.plain)
+                    railButton("Workspace settings", "slider.horizontal.3", selected: false) {
+                        if !dirty || mayDiscardEdits() { draft = host }
+                    }
                 }
+                SettingsLink {
+                    Label("Appearance", systemImage: "paintpalette")
+                        .font(.system(size: 12))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8)
+                        .frame(height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Change theme and code font")
             }
-            .padding(.horizontal, 11).padding(.top, 29).padding(.bottom, 14)
-            .frame(width: 164)
-            .background(Color(red: 0.095, green: 0.103, blue: 0.117))
-            Divider()
-            if !showsFiles {
-                let activeAgent = showsActivityAgent ? agents.first { $0.host == current && $0.lane == activeAgentLane[$0.host] } : nil
-                FleetOverview(hosts: hosts, section: section, agents: agents, activeAgentID: activeAgent?.id,
-                              showsAgent: showsActivityAgent, onOpen: { openWorkspace($0) }, onSelectAgent: {
-                    openWorkspace($0.host, lane: $0.lane, inActivity: true)
-                }, onShowRuns: { activityAgentOpen = false })
-                .frame(width: showsActivityAgent ? 350 : nil)
-                if showsActivityAgent { Divider() }
+            .padding(.horizontal, 13).padding(.top, 34).padding(.bottom, 12)
+            .frame(width: 180)
+            .background(palette.navigation)
+            palette.separator.frame(width: 1)
+            if showsDashboard {
+                dashboard(showsAgent: showsActivityAgent)
+                    .frame(width: showsActivityAgent ? 360 : nil)
+                    .environment(\.workbenchPalette, overviewPalette)
+                    .tint(overviewPalette.tint)
+                    .background(overviewPalette.editor)
+                if showsActivityAgent { palette.separator.frame(width: 1) }
+            } else if !showsFiles {
+                overview
+                    .environment(\.workbenchPalette, overviewPalette)
+                    .tint(overviewPalette.tint)
+                    .background(overviewPalette.editor)
             }
             ZStack {
                 if let host = current {
-                    WorkspaceView(host: host, monitorRuns: showsWorkspace && scenePhase == .active, showsFiles: showsFiles,
-                                  onOpenFiles: { openWorkspace(host) }, selectedAgentLane: laneSelection, onAgentLabelsChange: { labels in
-                        if localAgentLabels[host] != labels {
-                            localAgentLabels[host] = labels
-                            if labels != nil { sidebarAgents[host] = agentRows(host) }
-                        }
+                    WorkspaceView(host: host, draftStore: workspaceDrafts, monitorRuns: showsWorkspace && scenePhase == .active, isVisible: showsWorkspace,
+                                  selectedAgentLane: laneSelection, onAgentLabelsChange: { labels in
+                        if labels != nil { rosterRevision = UUID() }
                     }, onActiveAgentLaneChange: { lane in
                         if activeAgentLane[host] != lane { activeAgentLane[host] = lane }
                     }).id(host)
@@ -443,9 +506,15 @@ private struct FleetWindow: View {
             .allowsHitTesting(showsWorkspace)
             .accessibilityHidden(!showsWorkspace)
         }
-        .background(Color(red: 0.075, green: 0.083, blue: 0.095))
+        .background(palette.editor)
         .frame(minWidth: 960, minHeight: 620)
         .task { await loadHosts() }
+        .onChange(of: collapsedGroups) { _, groups in
+            UserDefaults.standard.set(groups.sorted(), forKey: "FleetCollapsedGroups")
+        }
+        .onChange(of: expandedAgents) { _, workspaces in
+            UserDefaults.standard.set(workspaces, forKey: "FleetExpandedWorkspaces")
+        }
         .task(id: sidebarQuery) { await monitorSidebar(sidebarQuery) }
         .onReceive(NotificationCenter.default.publisher(for: .init("FleetOpenFolder"))) { _ in chooseWorkspace(file: false) }
         .onReceive(NotificationCenter.default.publisher(for: .init("FleetOpenWorkspace"))) { _ in chooseWorkspace(file: true) }
@@ -470,10 +539,17 @@ private struct FleetWindow: View {
         } message: { Text(error) }
         .confirmationDialog("Remove this workspace from Fleet?", isPresented: $confirmingRemoval) {
             Button("Remove workspace", role: .destructive) {
+                let removed = selectedHost
                 Task {
                     do {
-                        _ = try await FleetBridge.send(["op": "remove_host", "id": selectedHost])
-                        selectedHost = "local"; openedRepo = nil; laneSelection = nil; await loadHosts()
+                        _ = try await FleetBridge.send(["op": "remove_host", "id": removed])
+                        workspaceDrafts.remove(workspaceID: removed)
+                        if selectedHost == removed {
+                            selectedHost = "local"
+                            openedRepo = nil
+                            laneSelection = nil
+                        }
+                        await loadHosts()
                     } catch { self.error = error.localizedDescription }
                 }
             }
@@ -510,6 +586,34 @@ private struct FleetWindow: View {
         } catch { self.error = error.localizedDescription }
     }
 
+    private func dashboard(showsAgent: Bool) -> some View {
+        let agents = activityAgents
+        let activeAgent = showsAgent ? agents.first { $0.host == current && $0.lane == activeAgentLane[$0.host] } : nil
+        let endpoints = activityHosts
+        let running = endpoints.filter { reachable[$0.ssh] == true }.flatMap { host in
+            (liveRuns[host.ssh] ?? []).map { (host, $0) }
+        }
+        return ActivityDashboard(agents: agents, runs: running,
+                                 unavailable: endpoints.filter { reachable[$0.ssh] == false }.map(\.label),
+                                 loading: endpoints.contains { reachable[$0.ssh] == nil },
+                                 selectedAgentID: activeAgent?.id, onOpenAgent: { agent, action in
+            openWorkspace(agent.host, lane: agent.lane, inActivity: true, action: action)
+        }, onOpenRun: { host, run in
+            let endpoint = endpoints.first { $0.ssh == host.ssh } ?? host
+            showRuns(endpoint.id + "/" + run)
+        }, onShowRuns: { showRuns(nil) },
+           onCloseAgent: showsAgent ? { activityAgentOpen = false } : nil)
+    }
+
+    private var overview: some View {
+        FleetOverview(hosts: hosts, section: section == "Activity" ? "Runs" : section, agents: activityAgents,
+                      requestedRunID: section == "Activity" ? activityRunID : nil,
+                      onShowAgents: section == "Activity" ? { activityRunsOpen = false } : nil,
+                      onOpen: { openWorkspace($0) }, onSelectAgent: {
+            openWorkspace($0.host, lane: $0.lane, inActivity: true)
+        })
+    }
+
     private func hostRow(_ host: FleetHost) -> some View {
         let workspace = sidebarHost(host)
         let selected = section == "Workspace" && workspace.id == selectedHost
@@ -521,7 +625,7 @@ private struct FleetWindow: View {
                 } label: {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 8, weight: .semibold))
-                        .frame(width: 15, height: 28)
+                        .frame(width: 15, height: 31)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -553,20 +657,31 @@ private struct FleetWindow: View {
                         else { openWorkspace(workspace, lane: lane, inActivity: section == "Activity") }
                     } label: {
                         HStack(spacing: 4) {
-                            Circle().fill(agent.statusColor).frame(width: 5, height: 5)
+                            Circle().fill(agent.statusColor(palette)).frame(width: 5, height: 5)
                             Text(agent.label).lineLimit(1)
                             Spacer(minLength: 1)
-                            Text(agent.statusLabel).font(.system(size: 9)).foregroundStyle(agent.statusColor)
+                            Text(agent.statusLabel).font(.system(size: 9)).foregroundStyle(agent.statusColor(palette))
                         }
                         .font(.system(size: 11, weight: focused ? .semibold : .regular))
-                        .padding(.horizontal, 5).frame(height: 22)
-                        .background(focused ? FleetPalette.accent.opacity(0.105) : .clear, in: RoundedRectangle(cornerRadius: 4))
+                        .padding(.horizontal, 6).frame(height: 26)
+                        .background(focused ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 4))
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, 19)
                     .accessibilityLabel("\(agent.label), \(agent.statusLabel == "—" ? "status unavailable" : agent.statusLabel)")
                     .help(agent.label)
+                    .contextMenu {
+                        if agent.schedule == nil {
+                            Button("Rename Agent…") {
+                                openWorkspace(workspace, lane: lane, inActivity: section == "Activity", action: .rename)
+                            }
+                            Button("Delete Agent…", role: .destructive) {
+                                openWorkspace(workspace, lane: lane, inActivity: section == "Activity", action: .delete)
+                            }
+                            .disabled(FleetRunStatus.isActive(agent.status))
+                        }
+                    }
                 }
             }
         }
@@ -577,25 +692,18 @@ private struct FleetWindow: View {
     }
 
     private func agentRows(_ workspace: FleetHost) -> [SidebarAgent] {
-        let remote = sidebarAgents[workspace] ?? []
-        let known = remote.filter { $0.schedule == nil && ["codex", "cursor"].contains($0.agent) && $0.lane > 0 }
-        guard current == workspace, let local = localAgentLabels[workspace] else {
-            return known + remote.filter { $0.schedule != nil }
+        (sidebarAgents[workspace] ?? []).filter {
+            $0.schedule != nil || (["codex", "cursor"].contains($0.agent) && $0.lane > 0)
         }
-        let knownByLane = Dictionary(uniqueKeysWithValues: known.map {
-            (FleetAgentLane(agent: $0.agent, lane: $0.lane), $0)
-        })
-        let manual = local.keys.sorted { ($0.agent, $0.lane) < ($1.agent, $1.lane) }.map { lane in
-            SidebarAgent(agent: lane.agent, lane: lane.lane, status: knownByLane[lane]?.status ?? "ready",
-                         title: knownByLane[lane]?.title, schedule: nil, name: local[lane])
-        }
-        return manual + remote.filter { $0.schedule != nil }
     }
 
     private func monitorSidebar(_ query: SidebarQuery) async {
         guard query.active, !query.hosts.isEmpty else { return }
         let currentHosts = Set(query.hosts)
         sidebarAgents = sidebarAgents.filter { currentHosts.contains($0.key) }
+        let destinations = Set(query.hosts.map(\.ssh))
+        reachable = reachable.filter { destinations.contains($0.key) }
+        liveRuns = liveRuns.filter { destinations.contains($0.key) }
         await withTaskGroup(of: Void.self) { group in
             for workspaces in Dictionary(grouping: query.hosts, by: \.ssh).values {
                 group.addTask { await monitorSidebarDestination(workspaces, query: query) }
@@ -607,50 +715,66 @@ private struct FleetWindow: View {
         guard let target = workspaces.first else { return }
         let repos = Set(workspaces.map(\.repo)).sorted()
         while !Task.isCancelled {
-            let requestedLabels = localAgentLabels
-            let rows: [String: [SidebarAgent]]
+            let roster: SidebarRoster?
             do {
-                let reply = try await FleetBridge.call(target, ["op": "sidebar_agents", "repos": repos])
-                let data = try JSONSerialization.data(withJSONObject: reply["workspaces"] ?? NSNull(), options: .fragmentsAllowed)
-                rows = try JSONDecoder().decode([String: [SidebarAgent]].self, from: data)
+                let reply = try await FleetBridge.call(target, ["op": "sidebar_agents", "repos": repos, "live": query.dashboard,
+                                                                       "include_output": query.dashboard])
+                roster = try JSONDecoder().decode(SidebarRoster.self, from: JSONSerialization.data(withJSONObject: reply))
             } catch {
-                rows = [:]
+                roster = nil
             }
             guard !Task.isCancelled, query == sidebarQuery else { return }
-            var updated = sidebarAgents
-            for workspace in workspaces where requestedLabels[workspace] == localAgentLabels[workspace] {
-                updated[workspace] = rows[workspace.repo]
+            if reachable[target.ssh] != (roster != nil) { reachable[target.ssh] = roster != nil }
+            if let roster {
+                var updated = sidebarAgents
+                for workspace in workspaces {
+                    updated[workspace] = roster.workspaces[workspace.repo]
+                }
+                if sidebarAgents != updated { sidebarAgents = updated }
+                if let runs = roster.liveRuns, liveRuns[target.ssh] != runs { liveRuns[target.ssh] = runs }
             }
-            if sidebarAgents != updated { sidebarAgents = updated }
-            let running = rows.values.contains { $0.contains { $0.status == "running" } }
-            do { try await Task.sleep(for: .seconds(running ? 3 : 8)) } catch { return }
+            let running = roster?.workspaces.values.contains { $0.contains { FleetRunStatus.isActive($0.status) } } == true
+            do { try await Task.sleep(for: .seconds(query.dashboard ? 2 : running ? 3 : 8)) } catch { return }
         }
     }
 
-    private func railButton(_ text: String, _ symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    private func railButton(_ text: String, _ symbol: String, selected: Bool, area: WorkbenchArea = .workspace,
+                            action: @escaping () -> Void) -> some View {
+        let appearance = palette.scoped(to: area)
+        let foreground = selected ? appearance.tint : Color.primary.opacity(0.76)
+        return Button(action: action) {
             HStack(spacing: 7) {
-                Image(systemName: symbol).frame(width: 15)
+                Image(systemName: symbol)
+                    .foregroundStyle(palette.multicolorAppearance == nil ? foreground : appearance.tint)
+                    .frame(width: 15)
                 Text(text).lineLimit(1)
                 Spacer()
             }.font(.system(size: 12, weight: selected ? .semibold : .regular))
-                .foregroundStyle(selected ? FleetPalette.accent : Color.primary.opacity(0.76))
-                .padding(.horizontal, 6).frame(height: 28)
-                .background(selected ? FleetPalette.accent.opacity(0.105) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .foregroundStyle(foreground)
+                .padding(.horizontal, 8).frame(height: 31)
+                .background(selected ? appearance.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
         }.buttonStyle(.plain)
     }
 
-    private func openWorkspace(_ host: FleetHost, lane: FleetAgentLane? = nil, inActivity: Bool = false) {
+    private func showRuns(_ id: String?) {
+        activityRunID = id
+        activityRunsOpen = true
+        activityAgentOpen = false
+    }
+
+    private func openWorkspace(_ host: FleetHost, lane: FleetAgentLane? = nil,
+                               inActivity: Bool = false, action: FleetAgentAction? = nil) {
         if current != host && dirty && !mayDiscardEdits() { return }
         if let lane {
-            laneSelection = FleetAgentLaneSelection(agent: lane.agent, lane: lane.lane)
+            laneSelection = FleetAgentLaneSelection(agent: lane.agent, lane: lane.lane, action: action)
         } else if current != host {
             laneSelection = nil
         }
         openedRepo = host.repo
         selectedHost = host.id
         activityAgentOpen = inActivity
+        if inActivity { activityRunsOpen = false }
         section = inActivity ? "Activity" : "Workspace"
     }
 
@@ -685,6 +809,7 @@ private struct HostForm: View {
     @State var host: FleetHost
     let remote: Bool
     let saved: (FleetHost) async -> Void
+    @Environment(\.workbenchPalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @State private var saving = false
     @State private var issue = ""
@@ -728,7 +853,7 @@ private struct HostForm: View {
                 }
             }.disabled(saving)
             if browsing { remoteFolders.disabled(saving) }
-            if !issue.isEmpty { Text(issue).font(.caption).foregroundStyle(FleetPalette.warning) }
+            if !issue.isEmpty { Text(issue).font(.caption).foregroundStyle(palette.caution) }
             HStack {
                 if remote {
                     Button(testing ? "Connecting…" : "Test SSH") { testSSH() }
@@ -742,7 +867,7 @@ private struct HostForm: View {
                             catch { issue = error.localizedDescription }
                         }
                     }.disabled(saving || destination.isEmpty)
-                    if connected { Image(systemName: "checkmark.circle.fill").foregroundStyle(FleetPalette.success) }
+                    if connected { Image(systemName: "checkmark.circle.fill").foregroundStyle(palette.positive) }
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -758,7 +883,7 @@ private struct HostForm: View {
                     }
                 }.keyboardShortcut(.defaultAction).disabled(saving || host.label.isEmpty || host.repo.isEmpty || (remote && destination.isEmpty))
             }
-        }.padding(24).frame(width: 490).preferredColorScheme(.dark)
+        }.padding(24).frame(width: 490)
             .onChange(of: destination) {
                 destinationRevision = UUID()
                 connected = false
@@ -789,7 +914,7 @@ private struct HostForm: View {
             }.disabled(testing || folderRequest != nil)
 
             if let folderIssue {
-                Text(folderIssue.message).font(.caption).foregroundStyle(FleetPalette.warning).textSelection(.enabled)
+                Text(folderIssue.message).font(.caption).foregroundStyle(palette.caution).textSelection(.enabled)
                 if !connected {
                     Text("Use Test SSH if the host needs authentication.")
                         .font(.caption).foregroundStyle(.secondary)

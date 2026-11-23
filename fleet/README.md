@@ -1,10 +1,12 @@
-# Fleet Workspace guide
+# Fleet Workspace
 
 ### Installed Mac app
 
 Open **Fleet Workspace** in Applications. Choose **File → Open Folder** (⌘O) or **File → Open Workspace from File** (⇧⌘O) to import a VS Code `.code-workspace` project. You can also drop folders or workspace files onto the window. Imported roots appear in the sidebar and persist between launches.
 
-The file explorer, editor tabs, and agent controls share a native Mac window. Use ⌘P to find files, ⌘S to save, ⌘B to toggle the explorer, and ⌘W to close the current editor tab. Attach files using the paperclip beside a path in the explorer.
+The conversation stays in the main workspace. Choose **Files** or **Code** in the toolbar to open the file browser or editor alongside it. Use ⌘P to find files, ⌘S to save, ⌘B to toggle workspace files, and ⌘W to close the current editor tab. Attach files using the paperclip beside a path in the explorer.
+
+Open **Appearance** in the sidebar or **Fleet Workspace → Settings** (⌘,) to choose a theme and set the code font and size. Classic follows macOS appearance, and Multicolor gives each workspace view its own accent. The editor shows line numbers and highlights syntax for common source and configuration files.
 
 In a Git workspace, the Explorer marks changed files and folders. Expand **Git Changes** to see staged, unstaged, deleted, and untracked files. Select a file there to preview its changes. The working tree refreshes while the Explorer is open, including on SSH workspaces. For branches with an upstream, **Fetch Git updates** refreshes the ahead and behind counts from the configured remote. Fetch updates the remote-tracking branch and leaves your working files intact.
 
@@ -12,15 +14,15 @@ New workspaces open with no agents, and you can edit files immediately. Use **Ne
 
 Each agent keeps its own prompt, file attachments, and native CLI session. You can add more agents and run them in parallel. Click an agent in the sidebar to view its progress or stop its run.
 
-In **Activity**, select an agent to open its conversation beside the agent and run list. Send follow-up prompts, respond to approvals, or stop an active run there. Select a recent run to read its details, or choose **Open Files** to return to the workspace editor.
+**Activity** shows working agents first, with current tasks and recent output across connected workspaces. Select a card to open the conversation alongside the dashboard. Choose **Runs** for history and expandable action groups.
 
-Choose **Agent options → Delete Agent…** to remove an agent from the workspace. Stop any active run first. Its finished runs are available in **Activity**, and you can resume its native session from another agent.
+Use the pencil or trash button on an agent’s card or in its conversation header to rename or delete it. You can also right-click the agent in the workspace sidebar. Stop any active run before deleting an agent. Its finished runs remain in run history, and you can resume its native session from another agent.
 
 Type `/resume` in the composer to choose an existing session for this workspace, or use **Agent options → Resume Session…**. Fleet can resume a conversation started by the standalone CLI. Use `/new` for a fresh conversation in the current agent, `/status` to inspect it, and `/help` to see composer commands.
 
 The **Model** dropdown beside the provider and view controls lists models from the selected CLI on the workspace's machine. Choosing a model applies it to that workspace and harness, including scheduled tasks. **CLI default** follows the CLI's configuration. If the account rejects the configured default, choose one of the models returned by that machine. Each scheduled task starts a fresh conversation.
 
-Open **Activity**, **Schedules**, or **Risks** to monitor tasks across hosts. The sidebar shows running agents and paused schedules. For an SSH workspace, enter an OpenSSH alias, use **Test SSH** for interactive authentication, and browse to a project folder on the remote machine. The macOS bundle includes Python, Git, tmux, both agent CLIs, and the local MobileBERT model. The remote machine supplies Python 3.10+, its agent CLIs and their login sessions.
+Open **Activity**, **Schedules**, or **Risks** to monitor tasks across hosts. The sidebar shows running agents and paused schedules. For an SSH workspace, enter an OpenSSH alias, use **Test SSH** for interactive authentication, and browse to a project folder on the remote machine. The Intel Mac bundle includes Python, Git, tmux, both agent CLIs, and the local MobileBERT model. The remote machine supplies Python 3.10+, its agent CLIs and their login sessions.
 
 If Cursor needs authentication, select its agent and click **Sign In to Cursor** in the composer or agent options. Approve the browser page on this Mac. Cursor saves the login on the selected workspace machine, and Fleet verifies its model catalog. If Cursor requests workspace trust, **Trust Workspace for Cursor…** opens a confirmation for that folder. You can revoke Fleet’s trust setting in agent options.
 
@@ -28,29 +30,29 @@ Choose **Agent options → Edit Agent Command…** or type `/command` in the com
 
 Choose **Open Agent in Terminal** or type `/native` to use the CLI interactively in the workspace and resume the current session when available. Use this to respond to Codex or Cursor trust and approval prompts. **Open Workspace Shell** or `/shell` opens a login shell for checking the installation, signing in manually, or running a CLI command directly. For SSH workspaces, Terminal connects to the workspace machine using your OpenSSH settings. You can also launch a shell from the SSH workspace settings while troubleshooting a connection.
 
-Codex desktop runs show approval cards for shell commands and supported GitHub or other MCP confirmations when Codex requests a decision. Review the command or confirmation and choose **Approve Once** or **Decline** in the conversation. **Agent options → Approval Cards** controls this behavior for new desktop runs. Use **Open Agent in Terminal** for other interactive requests.
+Codex desktop runs show approval cards for shell commands and supported GitHub or other MCP confirmations when Codex requests a decision. The run shows **Needs Attention** while an approval is pending. Review the command or confirmation and choose **Approve Once** or **Decline** in the conversation. **Agent options → Approval Cards** controls this behavior for new desktop runs. Use **Open Agent in Terminal** for other interactive requests.
 
-During a Codex run started with **Approval Cards**, use the composer to send follow-up messages to the active turn. Fleet queues them in order and shows their delivery status in the conversation. If the turn ends before a message can be sent, you can copy it from the conversation and send it yourself.
+During a Codex run started with **Approval Cards** or **YOLO Mode**, use the composer to send follow-up messages to the active turn. Fleet queues them in order and shows their delivery status in the conversation. Messages still queued when a turn completes continue in the same conversation as follow-up turns. You can copy messages marked **Not sent** and send them again.
 
-Choose **Agent options → YOLO Mode (Full Access)** to run desktop Codex prompts without the Codex command sandbox or approval prompts. The setting applies to fresh and resumed turns for the selected agent, on the machine that hosts its workspace. Turn it off to return to your Approval Cards setting. When Approval Cards resumes a full-access conversation, Fleet restores the workspace sandbox. Fleet starts with YOLO off when you reopen the app.
+Choose **Agent options → YOLO Mode (Full Access)** to give desktop Codex commands full filesystem and network access without command approval prompts. The setting applies to fresh and resumed turns for the selected agent, on the machine that hosts its workspace. Supported MCP confirmations still appear in the conversation. YOLO runs can continue past the 30-minute desktop time limit and can be interrupted with **Stop**. Turn it off to return to your Approval Cards setting. When Approval Cards resumes a full-access conversation, Fleet restores the workspace sandbox. Fleet starts with YOLO off when you reopen the app.
 
 ### Running from a source checkout
 
-Fleet runs from this checkout on macOS or Linux with Python 3.10+ and a terminal. Install and authenticate the Codex or Cursor CLI on each machine where you want that agent to work.
+Run Fleet directly from this checkout. Fleet runs on macOS or Linux with Python 3.10+ and a terminal. Install and authenticate the Codex or Cursor CLI on each machine where you want that agent to work.
 
 ```sh
-./fleet/fleet.py ~/src/project
-./fleet/fleet.py --ssh build-01 /srv/project
-./fleet/fleet.py --ssh build-01 --agent cursor --persist /srv/project
+python3 fleet/fleet.py ~/src/project
+python3 fleet/fleet.py --ssh build-01 /srv/project
+python3 fleet/fleet.py --ssh build-01 --agent cursor --persist /srv/project
 ```
 
-The macOS bundle also provides the `fleet-workspace` launcher in `Contents/Resources/bin`.
+For the lowest local startup cost, run `python3 fleet/fleet.py` directly, or install Python dependencies as described below. Both start directly in Python.
 
-An SSH destination can be a host alias from your OpenSSH config, including its user, port, identity and jump host. The repo argument is a directory on that machine. Quote a remote home-relative path such as `'~/src/project'` so the local shell leaves it intact. Fleet uses the installed macOS app’s Python when available, or `python3` (3.10+) on the remote shell’s PATH. Fleet looks for agents on PATH, in common user bin directories, and in the installed macOS app. Remote machines do not need Node, a checkout of Fleet Workspace, or a running service. If Cursor reports a locked login keychain over SSH, use Fleet or Terminal in the desktop session on the Mac running Cursor.
+An SSH destination can be a host alias from your OpenSSH config, including its user, port, identity and jump host. The repo argument is a directory on that machine. Quote a remote home-relative path such as `'~/src/project'` so the local shell leaves it intact. Fleet uses the installed macOS app’s Python when available, or `python3` (3.10+) on the remote shell’s PATH. Fleet looks for agents on PATH, in common user bin directories, and in the installed macOS app. Remote machines do not need Node, a Fleet checkout, or a running service. If Cursor reports a locked login keychain over SSH, use Fleet or Terminal in the desktop session on the Mac running Cursor.
 
 ## Fleet dashboard
 
-Launch `./fleet/fleet.py` with no arguments for the terminal dashboard. You can also open it with `fleet-workspace --dashboard` from the installed app’s launcher or `/dashboard` at the workbench prompt. The inventory belongs to the machine running the dashboard. Open it on your laptop for a fleet-wide view. Successfully connecting with `--ssh` adds that destination to its inventory.
+Launch `python3 fleet/fleet.py` with no arguments for the dashboard. You can also open it with `fleet-workspace --dashboard` or `/dashboard` at the workbench prompt. The inventory belongs to the machine running the dashboard. Open it on your laptop for a fleet-wide view. Successfully connecting with `--ssh` adds that destination to its inventory.
 
 The Activity view lists running tasks and recent completions across machines. Press Enter on a task to inspect its history. Tab cycles through Hosts, Schedules, and Risks. Inspect a run for the public plan, actions, and outcome reported by its harness. Open the schedules view to choose the target repository, Codex or Cursor, prompt, repeat interval in minutes, and reporting mode. You can edit, pause, resume, and remove schedules there. Opening a host interactively lets you complete a first SSH login or host-key prompt. Background polling uses key-based login or an existing authenticated connection.
 
@@ -85,7 +87,7 @@ Only eligible transient events enter the classifier. Final assistant messages, w
 
 | Component | Work performed |
 | --- | --- |
-| Launcher | Starts the Python terminal interface or opens the installed macOS app. |
+| Launcher | Runs the Python terminal interface or opens the installed macOS app. |
 | SSH transport | Sends a small compressed Python bundle through OpenSSH, installs it atomically under `~/.cache/vhscode/fleet/<digest>`, and attaches a PTY on the same authenticated connection. Only terminal I/O crosses that connection during editing. |
 | Dashboard and scheduler | Poll hosts in the background and persist host-local schedules in SQLite. The dashboard fetches individual histories on demand. Each host retains up to 100 finished runs and 80 events per run. |
 | File browser | Enumerates one directory on demand and renders a page of entries. The native editor owns the open buffer. The workbench keeps paths for tagged files. |

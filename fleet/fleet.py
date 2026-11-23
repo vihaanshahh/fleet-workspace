@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fleet Workspace terminal workbench. This file also runs directly on an SSH target."""
+"""VHSCode terminal workbench. This file also runs directly on an SSH target."""
 from __future__ import annotations
 
 import argparse
@@ -152,7 +152,7 @@ def work(root, agent, quiet, view):
 def main():
     if sys.version_info < (3, 10):
         sys.exit("Fleet Workspace requires Python 3.10 or later")
-    parser = argparse.ArgumentParser(prog="fleet-workspace", description="Edit a repository and use its native coding agents.")
+    parser = argparse.ArgumentParser(description="Edit a repository and use its native coding agents.")
     parser.add_argument("repo", default=".", nargs="?", help="repository directory on the target machine")
     parser.add_argument("--ssh", metavar="HOST", help="OpenSSH destination or configured host alias")
     parser.add_argument("--view", choices=["actions", "summary", "risks"], help="override the repository reporting setting")

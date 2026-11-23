@@ -78,11 +78,12 @@ def run(
         command, environment = _require_harness(root, agent)
         prompt = prompt_with_tags(prompt, tags)
         if interactive_run is not None and agent == "codex":
-            from fleet_codex import run_approval_turn
+            from fleet_codex import run_desktop_turn
 
-            code = run_approval_turn(root, command, environment, prompt, session, stream, model, interactive_run)
+            code = run_desktop_turn(root, command, environment, prompt, session, stream, model, interactive_run,
+                                    yolo=yolo)
         else:
-            code = _run_process(root, agent, command, environment, prompt, session, stream, model, yolo=yolo)
+            code = _run_process(root, agent, command, environment, prompt, session, stream, model)
         if code:
             failure = f"{agent} exited with status {code}."
         elif stream.failed:
@@ -107,12 +108,10 @@ def run(
 
 
 def _run_process(root: Path, agent: str, command: list[str], environment: dict[str, str],
-                 prompt: str, session: str | None, stream: _Stream, model: str | None, *, yolo: bool) -> int:
+                 prompt: str, session: str | None, stream: _Stream, model: str | None) -> int:
     if agent == "codex":
         args = ["exec", "resume"] if session else ["exec"]
         args.append("--json")
-        if yolo:
-            args.append("--dangerously-bypass-approvals-and-sandbox")
         if model:
             args.append(f"--model={model}")
         args.extend(["--", session, "-"] if session else ["-"])
@@ -243,12 +242,9 @@ def _find_harness(agent: str, parts: list[str]) -> tuple[list[str], dict[str, st
     if sys.platform == "darwin":
         # An SSH-launched workspace can use the CLIs from the app installed on its own host.
         fallback.extend(
-            path
-            for bundle_bin in (
-                "Applications/Fleet Workspace.app/Contents/Resources/bin",
-                "Applications/Fleet Workbench.app/Contents/Resources/bin",
-            )
-            for path in (home / bundle_bin, Path("/") / bundle_bin)
+            directory / app / "Contents/Resources/bin"
+            for directory in (home / "Applications", Path("/Applications"))
+            for app in ("Fleet Workspace.app", "Fleet Workbench.app")
         )
     paths = list(dict.fromkeys([*inherited, *(str(path) for path in fallback if path.is_absolute())]))
     search_path = os.pathsep.join(paths)
@@ -306,6 +302,10 @@ def _stop(process: subprocess.Popen) -> None:
     except ProcessLookupError:
         process.wait()
         return
+    except PermissionError:
+        if process.poll() is not None:
+            return
+        raise
     try:
         process.wait(timeout=2)
     except (subprocess.TimeoutExpired, KeyboardInterrupt):
@@ -315,6 +315,9 @@ def _stop(process: subprocess.Popen) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        if process.poll() is None:
+            raise
     process.wait()
 
 

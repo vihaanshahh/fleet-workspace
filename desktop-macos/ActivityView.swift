@@ -1,18 +1,5 @@
 import SwiftUI
 
-private let panel = Color(red: 0.105, green: 0.117, blue: 0.133)
-private let divider = Color.white.opacity(0.09)
-
-struct FleetActivityAgent: Identifiable {
-    let host: FleetHost
-    let lane: FleetAgentLane
-    let label: String
-    let status: String
-    let statusLabel: String
-
-    var id: String { "\(host.id)/\(lane.agent)/\(lane.lane)" }
-}
-
 private struct FleetRunRow: Identifiable {
     let host: FleetHost
     let key: String
@@ -81,11 +68,10 @@ private struct FleetSnapshot {
     let error: String?
 }
 
-private struct FleetEvent: Identifiable {
-    let id: Int
-    let kind: String
-    let text: String
-    let date: Date?
+private struct FleetRunDetail {
+    let row: FleetRunRow
+    let steps: [FleetActivityStep]
+    let pendingApprovals: [String]
 }
 
 private struct ScheduleDraft: Identifiable {
@@ -113,22 +99,20 @@ struct FleetOverview: View {
     let hosts: [FleetHost]
     let section: String
     let agents: [FleetActivityAgent]
-    let activeAgentID: String?
-    let showsAgent: Bool
+    var requestedRunID: String? = nil
+    var onShowAgents: (() -> Void)? = nil
     let onOpen: (FleetHost) -> Void
     let onSelectAgent: (FleetActivityAgent) -> Void
-    let onShowRuns: () -> Void
 
+    @Environment(\.workbenchPalette) private var palette
     @Environment(\.scenePhase) private var scenePhase
     @State private var snapshots: [String: FleetSnapshot] = [:]
     @State private var refreshing = false
     @State private var runSelection: String?
     @State private var scheduleSelection: String?
-    @State private var events: [FleetEvent] = []
-    @State private var eventsRunID: String?
-    @State private var eventError: String?
-    @State private var loadingEvents = false
-    @State private var showEvents = false
+    @State private var runDetail: FleetRunDetail?
+    @State private var timelineError: (id: String, message: String)?
+    @State private var timelineRefresh = UUID()
     @State private var draft: ScheduleDraft?
     @State private var deleting: FleetScheduleRow?
     @State private var operationError: String?
@@ -151,20 +135,28 @@ struct FleetOverview: View {
         schedules.first { $0.id == scheduleSelection } ?? schedules.first
     }
 
+    private var timelineQuery: String? {
+        guard scenePhase == .active, !schedulesOnly, let row = selectedRun else { return nil }
+        return "\(row.id):\(row.status):\(timelineRefresh)"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 17) {
             header
             if !hosts.isEmpty {
-                if !showsAgent { metrics }
+                if schedulesOnly || risksOnly { metrics }
                 connectionNotice
             }
             GeometryReader { geometry in
-                if showsAgent {
-                    list
-                } else if geometry.size.width >= 735 {
+                if geometry.size.width >= 735 {
                     HStack(spacing: 12) {
-                        list.frame(minWidth: 370, maxWidth: .infinity)
-                        detail.frame(width: min(380, geometry.size.width * 0.43))
+                        if schedulesOnly {
+                            list.frame(minWidth: 370, maxWidth: .infinity)
+                            detail.frame(width: min(380, geometry.size.width * 0.43))
+                        } else {
+                            list.frame(width: min(350, geometry.size.width * 0.38))
+                            detail.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
                     }
                 } else {
                     VStack(spacing: 12) {
@@ -185,10 +177,12 @@ struct FleetOverview: View {
                 await refresh()
             }
         }
-        .task(id: schedulesOnly ? nil : selectedRun.map { "\($0.id):\($0.status)" }) {
-            await loadEvents()
+        .task(id: timelineQuery) {
+            if let query = timelineQuery, let row = selectedRun { await monitorTimeline(row, query: query) }
         }
-        .onChange(of: section) { showEvents = false }
+        .onChange(of: requestedRunID, initial: true) { _, id in
+            if let id { runSelection = id }
+        }
         .sheet(item: $draft) { draft in
             ScheduleEditor(draft: draft, hosts: endpoints) {
                 self.draft = nil
@@ -220,11 +214,12 @@ struct FleetOverview: View {
                 Text(section)
                     .font(.system(size: 28, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)
-                Text(schedulesOnly ? "Manage recurring work on your Fleet hosts."
-                     : risksOnly ? "Inspect failures and breakage reported by agents."
-                     : "Track agent work across your Fleet hosts.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                if schedulesOnly || risksOnly {
+                    Text(schedulesOnly ? "Manage recurring work on your Fleet hosts."
+                         : "Inspect failures and breakage reported by agents.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer(minLength: 4)
             if refreshing {
@@ -240,10 +235,8 @@ struct FleetOverview: View {
             .help("Refresh hosts")
             .accessibilityLabel("Refresh hosts")
             .disabled(refreshing || hosts.isEmpty)
-            if showsAgent {
-                Button(action: onShowRuns) { Image(systemName: "sidebar.trailing") }
-                    .help("Show run details")
-                    .accessibilityLabel("Show run details")
+            if let onShowAgents {
+                Button(action: onShowAgents) { Label("Back to Activity", systemImage: "arrow.left") }
             }
             if schedulesOnly {
                 Button {
@@ -260,15 +253,11 @@ struct FleetOverview: View {
     private var metrics: some View {
         HStack(spacing: 9) {
             if schedulesOnly {
-                metric("Enabled", schedules.filter(\.enabled).count, icon: "clock", color: FleetPalette.accent)
+                metric("Enabled", schedules.filter(\.enabled).count, icon: "clock", color: palette.tint)
                 metric("Paused", schedules.filter { !$0.enabled }.count, icon: "pause", color: .secondary)
             } else if risksOnly {
-                metric("Flagged runs", runs.count, icon: "exclamationmark.triangle", color: FleetPalette.warning)
-                metric("Failed", runs.filter { $0.status == "failed" }.count, icon: "xmark.circle", color: FleetPalette.failure)
-            } else {
-                metric("Running", allRuns.filter { $0.status == "running" }.count, icon: "bolt", color: FleetPalette.accent)
-                metric("Completed", allRuns.filter { $0.status == "completed" }.count, icon: "checkmark.circle", color: .secondary)
-                metric("Flagged", allRuns.filter(\.hasRisk).count, icon: "exclamationmark.triangle", color: FleetPalette.warning)
+                metric("Flagged runs", runs.count, icon: "exclamationmark.triangle", color: palette.caution)
+                metric("Failed", runs.filter { $0.status == "failed" }.count, icon: "xmark.circle", color: palette.negative)
             }
         }
     }
@@ -284,7 +273,7 @@ struct FleetOverview: View {
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 9)
-        .fleetPanel()
+        .fleetPanel(palette)
     }
 
     @ViewBuilder private var connectionNotice: some View {
@@ -303,24 +292,22 @@ struct FleetOverview: View {
                       systemImage: "wifi.exclamationmark")
             }
             .font(.system(size: 12))
-            .foregroundStyle(FleetPalette.warning)
+            .foregroundStyle(palette.caution)
             .padding(10)
-            .fleetPanel()
+            .fleetPanel(palette)
         }
     }
 
     private var list: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if agents.isEmpty {
-                listHeading(schedulesOnly ? "All Schedules" : risksOnly ? "Reported Risks" : "Recent Runs",
-                            count: schedulesOnly ? schedules.count : runs.count)
-            }
+            listHeading(schedulesOnly ? "All Schedules" : risksOnly ? "Reported Risks" : "Recent Runs",
+                        count: schedulesOnly ? schedules.count : runs.count)
             if hosts.isEmpty {
                 empty("No hosts configured", "Add a host to view Fleet activity.", icon: "server.rack")
             } else if schedulesOnly, schedules.isEmpty {
                 empty(refreshing ? "Loading schedules…" : "No schedules yet",
                       refreshing ? "" : "Create a schedule to run a task at an interval.", icon: "calendar")
-            } else if !schedulesOnly, runs.isEmpty, agents.isEmpty {
+            } else if !schedulesOnly, runs.isEmpty {
                 empty(refreshing ? "Loading runs…" : risksOnly ? "No reported risks" : "No activity yet",
                       refreshing ? "" : risksOnly ? "Risks appear when a run flags a problem." : "Run an agent task to see it here.",
                       icon: risksOnly ? "checkmark.shield" : "waveform.path")
@@ -334,33 +321,22 @@ struct FleetOverview: View {
                                     metadata: "\(row.host.label) · \(displayAgent(row.agent)) · every \(row.minutes) min",
                                     note: row.repository,
                                     status: row.enabled ? "Enabled" : "Paused",
-                                    color: row.enabled ? FleetPalette.accent : .secondary,
+                                    color: row.enabled ? palette.tint : .secondary,
                                     active: selectedSchedule?.id == row.id
                                 ) { scheduleSelection = row.id }
                             }
                         } else {
-                            if !agents.isEmpty {
-                                listHeading("Agents", count: agents.count)
-                                ForEach(agents) { agent in
-                                    rowButton(agent.label, metadata: agent.host.label, note: "", status: agent.statusLabel,
-                                              color: statusColor(agent.status), active: activeAgentID == agent.id) { onSelectAgent(agent) }
-                                        .help(agent.host.repo)
-                                }
-                                listHeading("Recent Runs", count: runs.count)
-                            }
                             ForEach(runs) { row in
                                 rowButton(
                                     row.title,
                                     metadata: "\(row.host.label) · \(displayAgent(row.agent)) · \(row.started.formatted(.relative(presentation: .named)))",
                                     note: risksOnly ? (row.risk.isEmpty ? row.outcome : row.risk) : row.action,
                                     markdownNote: true,
-                                    status: row.status.capitalized,
+                                    status: FleetRunStatus.label(row.status),
                                     color: statusColor(row.status),
                                     active: selectedRun?.id == row.id
                                 ) {
                                     runSelection = row.id
-                                    showEvents = false
-                                    if showsAgent { onShowRuns() }
                                 }
                             }
                         }
@@ -369,7 +345,7 @@ struct FleetOverview: View {
                 }
             }
         }
-        .fleetPanel()
+        .fleetPanel(palette)
     }
 
     private func listHeading(_ title: String, count: Int) -> some View {
@@ -381,7 +357,7 @@ struct FleetOverview: View {
             }
             .padding(.horizontal, 13)
             .padding(.vertical, 10)
-            Rectangle().fill(divider).frame(height: 1)
+            Rectangle().fill(palette.separator).frame(height: 1)
         }
     }
 
@@ -402,7 +378,7 @@ struct FleetOverview: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 9)
-            .background(active ? FleetPalette.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .background(active ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -413,10 +389,10 @@ struct FleetOverview: View {
         if schedulesOnly, let row = selectedSchedule {
             detailPanel(title: "Schedule Details") { scheduleDetails(row) }
         } else if !schedulesOnly, let row = selectedRun {
-            detailPanel(title: "Run Details") { runDetails(row) }
+            runDetails(row).id(row.id).fleetPanel(palette)
         } else {
             empty(schedulesOnly ? "Select a schedule" : "Select a run", "", icon: "sidebar.trailing")
-                .fleetPanel()
+                .fleetPanel(palette)
         }
     }
 
@@ -426,103 +402,119 @@ struct FleetOverview: View {
                 .font(.system(size: 12, weight: .semibold))
                 .padding(.horizontal, 13)
                 .padding(.vertical, 10)
-            Rectangle().fill(divider).frame(height: 1)
+            Rectangle().fill(palette.separator).frame(height: 1)
             content()
         }
-        .fleetPanel()
+        .fleetPanel(palette)
     }
 
-    private func runDetails(_ row: FleetRunRow) -> some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 13) {
-                    Text(row.title).font(.system(size: 15, weight: .semibold)).lineLimit(3)
-                    HStack(spacing: 6) {
-                        statusPill(row.status.capitalized, color: statusColor(row.status))
-                        statusPill(row.view.capitalized, color: .secondary)
-                    }
-                    field("Host", row.host.label)
-                    field("Repository", row.repository, monospaced: true)
-                    field("Agent", displayAgent(row.agent))
-                    field("Started", row.started.formatted(date: .abbreviated, time: .shortened))
-                    let runEvents = eventsRunID == row.id ? events : []
-                    let riskEvent = runEvents.last { $0.kind == "risk" }
-                    let resultEvent = runEvents.last { $0.kind == "result" }
-                    let diagnostic = row.status == "failed" ? runEvents.last { $0.kind == "error" } : nil
-                    let planEvent = runEvents.last { $0.kind == "plan" && !row.action.isEmpty && $0.text.hasPrefix(row.action) }
-                    if !row.risk.isEmpty && !(showEvents && riskEvent != nil) {
-                        field("Risk", riskEvent?.text ?? row.risk, color: FleetPalette.warning, markdown: true)
-                    }
-                    let outcomeEvent = diagnostic ?? resultEvent ?? planEvent
-                    let outcome = outcomeEvent?.text ?? (row.outcome.isEmpty ? row.action : row.outcome)
-                    if !outcome.isEmpty && !(showEvents && outcomeEvent != nil) {
-                        field(row.status == "running" ? "Current action" : "Outcome", outcome,
-                              color: diagnostic == nil ? .primary : FleetPalette.warning,
-                              markdown: outcomeEvent != nil || !row.outcome.isEmpty || outcome.hasPrefix("### Plan\n"))
-                    }
-                    DisclosureGroup("Event log", isExpanded: $showEvents) {
-                        eventList(row)
-                    }
-                    .font(.system(size: 12, weight: .medium))
+    private func runDetails(_ selected: FleetRunRow) -> some View {
+        let timeline = runDetail?.row.id == selected.id ? runDetail : nil
+        let row = timeline?.row ?? selected
+        let steps = timeline?.steps ?? []
+        return VStack(spacing: 0) {
+            runHeader(row, pendingApprovals: timeline?.pendingApprovals ?? [])
+            Rectangle().fill(palette.separator).frame(height: 1)
+            ScrollViewReader { scroll in
+                ScrollView {
+                    runTimeline(row, steps: steps, loaded: timeline != nil)
+                        .padding(16)
+                    Color.clear.frame(height: 0).id("latest-event").accessibilityHidden(true)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(13)
-            }
-            Rectangle().fill(divider).frame(height: 1)
-            HStack {
-                Spacer()
-                let host = hostForRepository(row.host, repo: row.repository)
-                if let agent = agents.first(where: { $0.host == host && $0.lane.agent == row.agent && $0.lane.lane == row.lane }) {
-                    Button { onSelectAgent(agent) } label: { Label("Open Agent", systemImage: "bubble.left") }
-                        .help("Open \(agent.label)’s current conversation")
-                } else {
-                    Button { onOpen(host) } label: { Label("Open Workspace", systemImage: "folder") }
+                .frame(maxHeight: .infinity)
+                Rectangle().fill(palette.separator).frame(height: 1)
+                HStack {
+                    if !steps.isEmpty {
+                        Button { scroll.scrollTo("latest-event", anchor: .bottom) } label: {
+                            Label("Latest", systemImage: "arrow.down.to.line")
+                        }
+                        .help("Jump to the latest event")
+                    }
+                    Spacer()
+                    openRunButton(row)
                 }
+                .controlSize(.small)
+                .padding(9)
             }
-            .controlSize(.small)
-            .padding(9)
         }
     }
 
-    @ViewBuilder private func eventList(_ row: FleetRunRow) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if loadingEvents {
-                ProgressView().controlSize(.small).accessibilityLabel("Loading events")
-            } else if let eventError {
-                Text(eventError).foregroundStyle(FleetPalette.warning)
-                Button("Retry") { Task { await loadEvents() } }
-            } else if eventsRunID != row.id || events.isEmpty {
-                Text("No events recorded.").foregroundStyle(.secondary)
+    private func runHeader(_ row: FleetRunRow, pendingApprovals: [String]) -> some View {
+        let host = hostForRepository(row.host, repo: row.repository)
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(row.title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .lineLimit(2)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 0)
+                statusPill(FleetRunStatus.label(row.status), color: statusColor(row.status))
             }
-            if row.status == "running", !loadingEvents {
-                Button("Refresh Events") { Task { await loadEvents() } }
+            Text("\(displayAgent(row.agent)) · \(host.label) · \(row.started.formatted(date: .abbreviated, time: .shortened))")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            HStack(spacing: 8) {
+                Text(row.repository)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help(row.repository)
+                Spacer(minLength: 0)
+                statusPill(row.view.capitalized, color: .secondary)
+                    .help("Reporting mode")
             }
-            ForEach(eventsRunID == row.id ? events : []) { event in
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        Text(event.kind.capitalized)
-                            .foregroundStyle(event.kind == "risk" || event.kind == "error" ? FleetPalette.warning : FleetPalette.accent)
-                        Spacer()
-                        if let date = event.date {
-                            Text(date.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary)
-                        }
-                    }
-                    if AgentMarkdown.rendersEvent(event.kind) {
-                        AgentMarkdown(source: event.text, font: .system(size: 12)).equatable()
-                    } else {
-                        Text(event.text)
-                            .font(.system(size: 12))
-                            .fontWeight(.regular)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                .padding(8)
-                .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 5))
+            if row.status == FleetRunStatus.needsAttention {
+                Label(pendingApprovals.isEmpty ? "Waiting for approval" : pendingApprovals.joined(separator: " · "),
+                      systemImage: "hand.raised.fill")
+                    .lineLimit(2)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(palette.caution)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(palette.caution.opacity(0.09), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .padding(14)
+    }
+
+    private func runTimeline(_ row: FleetRunRow, steps: [FleetActivityStep], loaded: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 13) {
+            if let failure = timelineError, failure.id == row.id {
+                Text(failure.message).font(.caption).foregroundStyle(palette.caution)
+                Button("Retry") { timelineRefresh = UUID() }
+                    .controlSize(.small)
+            } else if !loaded {
+                ProgressView().controlSize(.small).accessibilityLabel("Loading timeline")
+            }
+            if !row.risk.isEmpty && !steps.contains(where: { $0.kind == .risk }) {
+                field("Flagged", row.risk, color: palette.caution, markdown: true)
+            }
+            if !steps.isEmpty {
+                FleetActivityTimeline(steps: steps)
+            } else if !row.outcome.isEmpty || !row.action.isEmpty {
+                let value = row.outcome.isEmpty ? row.action : row.outcome
+                field(FleetRunStatus.isActive(row.status) ? "Current action" : "Outcome", value, markdown: true)
+            } else if loaded {
+                Text("No events recorded.").font(.callout).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 7)
+    }
+
+    @ViewBuilder private func openRunButton(_ row: FleetRunRow) -> some View {
+        let host = hostForRepository(row.host, repo: row.repository)
+        if let agent = agents.first(where: {
+            $0.host.ssh == host.ssh && ($0.runID == row.key
+                || ($0.host == host && $0.lane.agent == row.agent && $0.lane.lane == row.lane))
+        }) {
+            Button("Open Agent") { onSelectAgent(agent) }
+                .help("Open \(agent.label)’s current conversation")
+        } else {
+            Button { onOpen(host) } label: { Label("Open Workspace", systemImage: "folder") }
+        }
     }
 
     private func scheduleDetails(_ row: FleetScheduleRow) -> some View {
@@ -530,7 +522,7 @@ struct FleetOverview: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 13) {
                     Text(row.title).font(.system(size: 15, weight: .semibold)).lineLimit(3)
-                    statusPill(row.enabled ? "Enabled" : "Paused", color: row.enabled ? FleetPalette.accent : .secondary)
+                    statusPill(row.enabled ? "Enabled" : "Paused", color: row.enabled ? palette.tint : .secondary)
                     field("Host", row.host.label)
                     field("Repository", row.repository, monospaced: true)
                     field("Agent", displayAgent(row.agent))
@@ -542,7 +534,7 @@ struct FleetOverview: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(13)
             }
-            Rectangle().fill(divider).frame(height: 1)
+            Rectangle().fill(palette.separator).frame(height: 1)
             HStack {
                 Menu {
                     Button("Delete Schedule…", role: .destructive) { deleting = row }
@@ -579,7 +571,7 @@ struct FleetOverview: View {
 
     private func empty(_ title: String, _ description: String, icon: String) -> some View {
         VStack(spacing: 7) {
-            Image(systemName: icon).font(.system(size: 24)).foregroundStyle(FleetPalette.accent.opacity(0.7))
+            Image(systemName: icon).font(.system(size: 24)).foregroundStyle(palette.tint.opacity(0.7))
             Text(title).font(.system(size: 13, weight: .semibold))
             if !description.isEmpty {
                 Text(description).font(.system(size: 12)).foregroundStyle(.secondary)
@@ -602,9 +594,10 @@ struct FleetOverview: View {
 
     private func statusColor(_ status: String) -> Color {
         switch status {
-        case "running": FleetPalette.accent
-        case "failed": FleetPalette.failure
-        case "cancelled": FleetPalette.warning
+        case "running": palette.tint
+        case FleetRunStatus.needsAttention: palette.caution
+        case "failed": palette.negative
+        case "cancelled": palette.caution
         default: .secondary
         }
     }
@@ -657,25 +650,38 @@ struct FleetOverview: View {
         }
     }
 
-    @MainActor private func loadEvents() async {
-        guard !schedulesOnly, let row = selectedRun else { return }
-        if eventsRunID != row.id { events = [] }
-        eventError = nil
-        loadingEvents = true
-        do {
-            let value = try await FleetBridge.call(row.host, ["op": "detail", "id": row.key])
-            guard !Task.isCancelled, selectedRun?.id == row.id else { return }
-            eventsRunID = row.id
-            events = (value["events"] as? [[String: Any]] ?? []).enumerated().compactMap { index, item in
-                guard let kind = item["kind"] as? String, let text = item["text"] as? String else { return nil }
-                let date = (item["at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
-                return FleetEvent(id: index, kind: kind, text: text, date: date)
+    @MainActor private func monitorTimeline(_ row: FleetRunRow, query: String) async {
+        var revision = ""
+        var active = FleetRunStatus.isActive(row.status)
+        timelineError = nil
+        repeat {
+            do {
+                let value = try await FleetBridge.call(row.host, ["op": "detail", "id": row.key, "revision": revision])
+                guard !Task.isCancelled, timelineQuery == query else { return }
+                if value["unchanged"] as? Bool != true {
+                    guard let metadata = value["run"] as? [String: Any],
+                          let latest = FleetRunRow(host: row.host, value: metadata) else {
+                        throw FleetError(message: "The run is no longer available on this host.")
+                    }
+                    let events = (value["events"] as? [[String: Any]] ?? []).enumerated().compactMap {
+                        FleetActivityEvent(index: $0.offset, value: $0.element)
+                    }
+                    let pending = (value["approvals"] as? [[String: Any]] ?? []).compactMap { approval in
+                        approval["decision"] is String ? nil : approval["title"] as? String
+                    }
+                    runDetail = FleetRunDetail(row: latest, steps: FleetActivityStep.timeline(events), pendingApprovals: pending)
+                    revision = value["revision"] as? String ?? ""
+                    active = FleetRunStatus.isActive(latest.status)
+                }
+                if timelineError != nil { timelineError = nil }
+            } catch {
+                guard !Task.isCancelled, timelineQuery == query else { return }
+                timelineError = (row.id, error.localizedDescription)
             }
-        } catch {
-            guard !Task.isCancelled, selectedRun?.id == row.id else { return }
-            eventError = error.localizedDescription
-        }
-        loadingEvents = false
+            if active {
+                do { try await Task.sleep(for: .seconds(row.host.ssh.isEmpty ? 2 : 4)) } catch { return }
+            }
+        } while active && !Task.isCancelled && timelineQuery == query
     }
 
     private func change(_ row: FleetScheduleRow, operation: String) {
@@ -714,6 +720,7 @@ private struct ScheduleEditor: View {
     @State var draft: ScheduleDraft
     let hosts: [FleetHost]
     let onSave: () -> Void
+    @Environment(\.workbenchPalette) private var palette
     @Environment(\.dismiss) private var dismiss
     @State private var error: String?
     @State private var saving = false
@@ -778,7 +785,7 @@ private struct ScheduleEditor: View {
                             .accessibilityLabel("Interval in minutes")
                         Text("minutes").font(.system(size: 12)).foregroundStyle(.secondary)
                         if interval == nil {
-                            Text("Enter 1–525,600 minutes.").font(.system(size: 11)).foregroundStyle(FleetPalette.warning)
+                            Text("Enter 1–525,600 minutes.").font(.system(size: 11)).foregroundStyle(palette.caution)
                         }
                     }
                 }
@@ -791,12 +798,12 @@ private struct ScheduleEditor: View {
                     .padding(5)
                     .frame(minHeight: 104, maxHeight: 150)
                     .accessibilityLabel("Prompt")
-                    .fleetPanel()
+                    .fleetPanel(palette)
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.system(size: 12))
-                    .foregroundStyle(FleetPalette.warning)
+                    .foregroundStyle(palette.caution)
             }
             HStack(spacing: 10) {
                 Spacer()
@@ -847,10 +854,10 @@ private func displayAgent(_ value: String) -> String {
 }
 
 private extension View {
-    func fleetPanel() -> some View {
-        background(panel, in: RoundedRectangle(cornerRadius: 8))
+    func fleetPanel(_ palette: WorkbenchPalette) -> some View {
+        background(palette.surface, in: RoundedRectangle(cornerRadius: 8))
             .overlay {
-                RoundedRectangle(cornerRadius: 8).strokeBorder(divider)
+                RoundedRectangle(cornerRadius: 8).strokeBorder(palette.separator)
                     .allowsHitTesting(false)
             }
     }

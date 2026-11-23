@@ -18,6 +18,7 @@ CATALOG_TIMEOUT = 8
 MAX_CATALOG_BYTES = 1024 * 1024
 MAX_MODELS = 500
 MAX_SESSIONS = 100
+MAX_RESTORED_TURNS = 8
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 CURSOR_MODEL = re.compile(r"(?P<id>[A-Za-z0-9][A-Za-z0-9_./:+@~\-]*)(?:\s+-\s+(?P<label>.+))?")
 CURSOR_STATUS = re.compile(r"\s+\((?:current|default)(?:, (?:current|default))?\)$")
@@ -169,12 +170,19 @@ def _instances(roots, runs, settings):
     from fleet_jobs import RUNS_VIEW
 
     placeholders = ",".join("?" for _ in roots)
-    latest = {}
+    history = {}
+    # Bound restored conversations per lane and discard runs from before a session reset.
     for row in runs.execute(
-        RUNS_VIEW + f" WHERE detached=1 AND repo IN ({placeholders}) ORDER BY started DESC, id DESC",
-        tuple(roots),
+        "WITH run_rows AS (" + RUNS_VIEW + "), ranked AS ("
+        "SELECT run_rows.*, ROW_NUMBER() OVER ("
+        "PARTITION BY repo, agent, lane ORDER BY started DESC, id DESC) AS position "
+        f"FROM run_rows WHERE detached=1 AND repo IN ({placeholders})) "
+        "SELECT * FROM ranked WHERE position <= ? ORDER BY repo, agent, lane, position",
+        (*roots, MAX_RESTORED_TURNS),
     ):
-        latest.setdefault((row["repo"], row["agent"], row["lane"]), dict(row))
+        history.setdefault((row["repo"], row["agent"], row["lane"]), []).append(
+            {key: row[key] for key in row.keys() if key != "position"}
+        )
     preferences = {
         (root, agent, lane): (session, generation, listed, name)
         for root, agent, lane, session, generation, listed, name in settings.execute(
@@ -184,22 +192,25 @@ def _instances(roots, runs, settings):
         )
     }
     instances = {}
-    for key in sorted(latest.keys() | preferences.keys()):
+    for key in sorted(history.keys() | preferences.keys()):
         root, agent, lane = key
-        run = latest.get(key)
+        runs_for_lane = history.get(key, [])
         session, generation, listed, name = preferences.get(key, (None, 0, None, None))
         # Rows without an explicit choice predate the roster. Restore only agents that were used.
-        if listed == 0 or (listed is None and not (run or session or generation)):
+        if listed == 0 or (listed is None and not (runs_for_lane or session or generation)):
             continue
-        if run and run["generation"] != generation:
-            run = None
-        instances.setdefault(root, []).append({"agent": agent, "lane": lane, "name": name, "session": session, "run": run})
+        runs_for_lane = [run for run in runs_for_lane if run["generation"] == generation]
+        instance = {"agent": agent, "lane": lane, "name": name, "session": session,
+                    "run": runs_for_lane[0] if runs_for_lane else None}
+        if runs_for_lane:
+            instance["history"] = runs_for_lane
+        instances.setdefault(root, []).append(instance)
     return instances
 
 
-def sidebar_agents(repos):
+def sidebar_agents(repos, *, live=False, include_output=False):
     from fleet_hosts import workspace_root
-    from fleet_jobs import _connect, _reap_manual, _title
+    from fleet_jobs import _connect, _ensure_daemon, _reap_manual, _title, activity_output
 
     if not isinstance(repos, list) or len(repos) > 256 or not all(isinstance(path, str) for path in repos):
         raise ValueError("Choose up to 256 workspace folders.")
@@ -211,23 +222,35 @@ def sidebar_agents(repos):
         except (ValueError, OSError):
             continue
     roots = set(mapped.values())
-    if not roots:
+    if not roots and not live:
         return {"workspaces": workspaces}
+    if live:
+        _ensure_daemon()
     _reap_manual()
-    placeholders = ','.join('?' for _ in roots)
+    placeholders = ",".join("?" for _ in roots)
     with _connect() as db, closing(_database()) as settings:
-        instances = _instances(roots, db, settings)
+        db.execute("BEGIN")
+        instances = _instances(roots, db, settings) if roots else {}
         schedules = db.execute(
             f"""SELECT s.repo,s.id AS schedule,s.agent,s.prompt,s.enabled,
                     EXISTS(SELECT 1 FROM runs WHERE schedule_id=s.id AND status='running') AS running
-                FROM schedules s WHERE repo IN ({','.join('?' for _ in roots)}) ORDER BY s.rowid""",
+                FROM schedules s WHERE repo IN ({placeholders}) ORDER BY s.rowid""",
             tuple(roots),
-        ).fetchall()
+        ).fetchall() if roots else []
+        live_runs = db.execute(
+            """SELECT id, agent, repo, title, substr(action, 1, 320) AS action, schedule_id AS schedule
+               FROM runs WHERE status='running' ORDER BY started DESC, id DESC"""
+        ).fetchall() if live else []
+        listed_runs = {row["run"]["id"] for rows in instances.values() for row in rows if row["run"]}
+        other_runs = [dict(row) for row in live_runs if row["id"] not in listed_runs]
+        output = activity_output(db, listed_runs | {row["id"] for row in other_runs}) if include_output else {}
     for repo, root in mapped.items():
         rows = [
             {"agent": instance["agent"], "lane": instance["lane"], "name": instance["name"],
              "status": run["status"] if (run := instance["run"]) else "ready",
-             "title": run["title"] if run else ""}
+             "title": run["title"] if run else "",
+             "action": (run["action"] or "")[:320] if run and run["status"] in ("running", "needs_attention") else "",
+             **({"runID": run["id"], "output": output.get(run["id"], [])} if include_output and run else {})}
             for instance in instances.get(root, [])
         ]
         rows.extend({
@@ -235,6 +258,11 @@ def sidebar_agents(repos):
             "status": "running" if row["running"] else ("scheduled" if row["enabled"] else "paused"),
         } for row in schedules if row["repo"] == root)
         workspaces[repo] = rows
+    if live:
+        for row in other_runs:
+            if row["id"] in output:
+                row["output"] = output[row["id"]]
+        return {"workspaces": workspaces, "live_runs": other_runs}
     return {"workspaces": workspaces}
 
 
